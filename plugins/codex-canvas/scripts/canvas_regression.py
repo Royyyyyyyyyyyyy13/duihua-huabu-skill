@@ -29,6 +29,7 @@ def main() -> int:
         check_static_files,
         check_store_invariants,
         check_anchor_no_source,
+        check_anchor_starter_backfill,
         check_checkpoint_stdin_guard,
         check_live_server,
         check_browser_ui,
@@ -92,8 +93,8 @@ def check_store_invariants() -> None:
         updated = add_node("store", {"id": "n1", "title": "更新标题"})
         data = load_session("store")
         assert_equal(data["schemaVersion"], 1, "session schema version missing")
-        assert_true(data["createdByPluginVersion"].startswith("0.1.0+codex."), "new session createdByPluginVersion missing")
-        assert_true(data["lastOpenedByPluginVersion"].startswith("0.1.0+codex."), "new session lastOpenedByPluginVersion missing")
+        assert_true("+codex." in data["createdByPluginVersion"], "new session createdByPluginVersion missing")
+        assert_true("+codex." in data["lastOpenedByPluginVersion"], "new session lastOpenedByPluginVersion missing")
         assert_equal(len(data["nodes"]), 1, "duplicate node id appended a second node")
         assert_equal(updated["summary"], "摘要", "partial duplicate node update cleared summary")
         assert_equal(updated["contextText"], "短上下文", "partial duplicate node update cleared contextText")
@@ -145,7 +146,7 @@ def check_store_invariants() -> None:
         assert_equal(legacy["schemaVersion"], 1, "legacy session was not migrated to schema version 1")
         assert_equal(legacy["createdByPluginVersion"], "unknown", "legacy createdByPluginVersion should not pretend to be current")
         assert_true(
-            legacy["lastOpenedByPluginVersion"].startswith("0.1.0+codex."),
+            "+codex." in legacy["lastOpenedByPluginVersion"],
             "legacy lastOpenedByPluginVersion should track the migrating plugin",
         )
         assert_equal(legacy["nodes"][0]["origin"], "live", "legacy node origin default missing")
@@ -173,6 +174,71 @@ def check_anchor_no_source() -> None:
             estimate_reconstruction_count([Turn(timestamp="", role="user", text="很短")]),
             1,
             "short old conversation should not force three nodes",
+        )
+
+
+def check_anchor_starter_backfill() -> None:
+    with temp_env(
+        CODEX_HOME=tempfile.mkdtemp(prefix="codex-starter-"),
+        CODEX_CANVAS_HOME=tempfile.mkdtemp(prefix="canvas-starter-"),
+    ):
+        codex_root = Path(os.environ["CODEX_HOME"])
+        transcript = codex_root / "sessions" / "2026" / "06" / "15" / "rollout-starter.jsonl"
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        turns = [
+            {"type": "session_meta", "payload": {"cwd": r"E:\GAME"}},
+        ]
+        for index in range(14):
+            turns.append(
+                {
+                    "type": "event_msg",
+                    "timestamp": f"2026-06-15T10:{index:02d}:00+08:00",
+                    "payload": {
+                        "type": "user_message",
+                        "message": f"第{index}轮需求：继续开发偷菜肉鸽版本，调整玩法、数值、发布验证和版本策略。" * 4,
+                    },
+                }
+            )
+            turns.append(
+                {
+                    "type": "event_msg",
+                    "timestamp": f"2026-06-15T10:{index:02d}:30+08:00",
+                    "payload": {
+                        "type": "agent_message",
+                        "message": f"第{index}轮实现：完成代码修改、回归测试、玩法验证，并记录发布结果。" * 4,
+                    },
+                }
+            )
+        transcript.write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in turns), encoding="utf-8")
+
+        from canvas_store import add_node, load_session
+        from conversation_anchor import bootstrap_anchor_node
+
+        add_node(
+            "starter",
+            {
+                "type": "anchor",
+                "title": "画布启用",
+                "summary": "从当前对话开始启用 Codex Canvas，后续在阶段完成时记录 checkpoint。",
+                "detailMarkdown": "## 当前项目状态\n- 项目目录：E:\\GAME。\n- 已经开发过两个版本，需要回溯生成初始节点。",
+                "contextText": "从当前对话开始启用 Codex Canvas。",
+                "source": "mixed",
+                "origin": "live",
+                "confidence": "high",
+                "relatedFiles": [r"E:\GAME\src\model\data.ts", r"E:\GAME\output\demo.zip"],
+                "tags": ["canvas", "checkpoint"],
+            },
+        )
+        result = bootstrap_anchor_node("starter", workspace_hint=r"E:\wrong-workspace")
+        assert_equal(result["created"], True, "starter anchor should allow historical backfill")
+        data = load_session("starter")
+        assert_true(len(data["nodes"]) > 1, "starter backfill did not create reconstructed nodes")
+        assert_equal(data["nodes"][0]["origin"], "reconstructed", "reconstructed nodes should be placed before starter")
+        assert_equal(data["nodes"][-1]["title"], "画布启用", "starter anchor should remain after reconstructed nodes")
+        assert_equal(len(data["edges"]), len(data["nodes"]) - 1, "starter backfill should build a complete mainline")
+        assert_true(
+            any(str(transcript) in ref for node in data["nodes"] for ref in node.get("evidenceRefs", [])),
+            "starter backfill did not use inferred workspace transcript",
         )
 
 

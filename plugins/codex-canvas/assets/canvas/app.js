@@ -1614,9 +1614,32 @@ async function resetCanvas() {
 }
 
 function runAnchorBootstrap() {
-  if (anchorBootstrapStarted || anchorBootstrapBlocked || !apiAvailable || state.nodes.length) return;
+  if (anchorBootstrapStarted || anchorBootstrapBlocked || !apiAvailable || !shouldRunAnchorBootstrap()) return;
   anchorBootstrapStarted = true;
   bootstrapAnchorNode();
+}
+
+function shouldRunAnchorBootstrap() {
+  if (!state.nodes.length) return true;
+  if (state.nodes.length !== 1 || state.edges.length) return false;
+  const node = state.nodes[0];
+  const text = [
+    node.type,
+    node.origin,
+    node.title,
+    node.summary,
+    node.detailMarkdown,
+    ...(node.tags || []),
+  ]
+    .join("\n")
+    .toLowerCase();
+  return (
+    node.type === "anchor" &&
+    node.origin === "live" &&
+    (text.includes("画布启用") ||
+      text.includes("从当前对话开始启用") ||
+      (text.includes("canvas") && text.includes("checkpoint")))
+  );
 }
 
 function showRecoveryStatus(message) {

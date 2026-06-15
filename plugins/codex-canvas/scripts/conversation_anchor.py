@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from canvas_store import GRID_COLUMN_GAP, GRID_COLUMNS, GRID_LEFT, GRID_ROW_GAP, GRID_TOP, add_edge, add_node, load_session
+from canvas_store import (
+    GRID_COLUMN_GAP,
+    GRID_COLUMNS,
+    GRID_LEFT,
+    GRID_ROW_GAP,
+    GRID_TOP,
+    add_edge,
+    add_node,
+    load_session,
+    save_session,
+)
 from transcript_recovery import Turn, codex_home, compact_text, parse_transcript
 
 
@@ -22,7 +34,8 @@ class AnchorSource:
 
 def bootstrap_anchor_node(session_id: str | None, workspace_hint: str | None = None) -> dict[str, Any]:
     data = load_session(session_id)
-    if data.get("nodes"):
+    starter_node = starter_anchor_node(data)
+    if data.get("nodes") and not starter_node:
         return {
             "ok": True,
             "created": False,
@@ -30,7 +43,8 @@ def bootstrap_anchor_node(session_id: str | None, workspace_hint: str | None = N
             "session": data,
         }
 
-    source = find_anchor_source(workspace_hint)
+    source_hint = infer_workspace_hint(data) if starter_node else None
+    source = find_anchor_source(source_hint or workspace_hint)
     if not source:
         return {
             "ok": False,
@@ -47,7 +61,11 @@ def bootstrap_anchor_node(session_id: str | None, workspace_hint: str | None = N
         if previous_node:
             add_edge(session_id, {"from": previous_node.get("id"), "to": node.get("id"), "label": ""})
         previous_node = node
-    session = load_session(session_id)
+    if starter_node and previous_node:
+        add_edge(session_id, {"from": previous_node.get("id"), "to": starter_node.get("id"), "label": ""})
+        session = reorder_reconstructed_before_starter(session_id, [node.get("id") for node in nodes], starter_node.get("id"))
+    else:
+        session = load_session(session_id)
     return {
         "ok": True,
         "created": True,
@@ -56,6 +74,74 @@ def bootstrap_anchor_node(session_id: str | None, workspace_hint: str | None = N
         "nodes": nodes,
         "session": session,
     }
+
+
+def starter_anchor_node(data: dict[str, Any]) -> dict[str, Any] | None:
+    nodes = list(data.get("nodes") or [])
+    edges = list(data.get("edges") or [])
+    if len(nodes) != 1 or edges:
+        return None
+    node = nodes[0]
+    if node.get("type") != "anchor" or node.get("origin") != "live":
+        return None
+    text = "\n".join(
+        [
+            str(node.get("title") or ""),
+            str(node.get("summary") or ""),
+            str(node.get("detailMarkdown") or ""),
+            " ".join(str(tag) for tag in node.get("tags") or []),
+        ]
+    )
+    if "画布启用" in text or "从当前对话开始启用" in text or ("canvas" in text.lower() and "checkpoint" in text.lower()):
+        return node
+    return None
+
+
+def infer_workspace_hint(data: dict[str, Any]) -> str | None:
+    text_parts: list[str] = []
+    path_values: list[str] = []
+    for node in list(data.get("nodes") or []):
+        text_parts.extend(
+            [
+                str(node.get("title") or ""),
+                str(node.get("summary") or ""),
+                str(node.get("detailMarkdown") or ""),
+                str(node.get("contextText") or ""),
+            ]
+        )
+        path_values.extend(str(value) for value in list(node.get("relatedFiles") or []))
+        path_values.extend(str(value) for value in list(node.get("evidenceRefs") or []))
+
+    text = "\n".join(text_parts)
+    project_match = re.search(r"项目目录[:：]\s*([A-Za-z]:\\[^\n\r。；;]+)", text)
+    if project_match:
+        return project_match.group(1).strip().rstrip(" .")
+
+    absolute_paths = [value.strip().rstrip(" .") for value in path_values if re.match(r"^[A-Za-z]:\\", value.strip())]
+    if not absolute_paths:
+        return None
+    try:
+        return os.path.commonpath(absolute_paths)
+    except ValueError:
+        return str(Path(absolute_paths[0]).parent)
+
+
+def reorder_reconstructed_before_starter(
+    session_id: str | None,
+    reconstructed_ids: list[str],
+    starter_id: str | None,
+) -> dict[str, Any]:
+    data = load_session(session_id)
+    node_by_id = {node.get("id"): node for node in data.get("nodes", [])}
+    ordered_ids = [node_id for node_id in reconstructed_ids if node_id in node_by_id]
+    if starter_id in node_by_id:
+        ordered_ids.append(starter_id)
+    ordered_ids.extend(node.get("id") for node in data.get("nodes", []) if node.get("id") not in set(ordered_ids))
+    data["nodes"] = [node_by_id[node_id] for node_id in ordered_ids if node_id in node_by_id]
+    for index, node in enumerate(data["nodes"]):
+        node["x"] = GRID_LEFT + (index % GRID_COLUMNS) * GRID_COLUMN_GAP
+        node["y"] = GRID_TOP + (index // GRID_COLUMNS) * GRID_ROW_GAP
+    return save_session(session_id, data)
 
 
 def find_anchor_source(workspace_hint: str | None) -> AnchorSource | None:
