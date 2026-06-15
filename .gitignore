@@ -1,0 +1,17 @@
+# Runtime logs
+*.log
+
+# Local browser/test artifacts
+.playwright-cli/
+output/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Temporary files
+*.tmp
+*.bak
+
+# Local packaged archives
+dist/

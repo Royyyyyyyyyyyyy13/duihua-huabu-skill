@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex Canvas</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23ff6d5a'/%3E%3Cpath d='M9 10h8v5H9zM15 18h8v5h-8zM17 13h4v7h-4z' fill='white'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./styles.css?v=20260615-reset-undo" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow">Codex Canvas</div>
+          <h1>当前对话检查点画布</h1>
+        </div>
+        <div class="top-actions">
+          <span id="sessionBadge" class="session-badge"></span>
+          <span id="connectHint" class="connect-hint hidden"></span>
+          <span id="recoveryStatus" class="status-hint hidden"></span>
+          <button id="refreshBtn" class="ghost-btn" type="button">刷新</button>
+          <button id="resetCanvasBtn" class="ghost-btn" type="button">还原画布</button>
+        </div>
+      </header>
+
+      <main id="workspace" class="workspace">
+        <section id="canvas" class="canvas" aria-label="checkpoint canvas">
+          <svg id="edgesLayer" class="edges-layer"></svg>
+          <div id="edgeHotLayer" class="edge-hot-layer"></div>
+          <div id="nodesLayer" class="nodes-layer"></div>
+          <div id="selectionBox" class="selection-box hidden"></div>
+          <div id="emptyState" class="empty-state">
+            <strong>还没有 checkpoint</strong>
+            <span>继续对话，Codex 会在阶段完成后记录 checkpoint。</span>
+          </div>
+        </section>
+
+        <aside class="detail-panel">
+          <div id="detailResizeHandle" class="detail-resize-handle" title="拖动改变侧边栏宽度"></div>
+          <div id="detailEmpty" class="detail-empty">
+            <h2>节点详情</h2>
+            <p>点击画布上的节点查看摘要、结构化详情和相关文件。</p>
+          </div>
+          <div id="detailContent" class="detail-content hidden">
+            <div class="detail-header">
+              <span id="detailType" class="type-pill"></span>
+            </div>
+            <h2 id="detailTitle"></h2>
+            <p id="detailSummary" class="detail-summary"></p>
+            <div class="detail-section">
+              <h3>标签</h3>
+              <div id="detailTags" class="tag-list"></div>
+            </div>
+            <div class="detail-section">
+              <h3>相关文件</h3>
+              <div id="detailFiles" class="file-list"></div>
+            </div>
+            <div class="detail-section">
+              <h3>证据来源</h3>
+              <div id="detailEvidence" class="file-list"></div>
+            </div>
+            <div class="detail-section">
+              <h3>结构化详情</h3>
+              <div id="detailMarkdown" class="markdown-detail"></div>
+              <details id="rawEvidenceWrap" class="raw-evidence">
+                <summary>相关原文片段</summary>
+                <pre id="detailRaw"></pre>
+              </details>
+            </div>
+            <button id="addToComposerBtn" class="primary-btn full" type="button">加入底部输入框</button>
+          </div>
+        </aside>
+      </main>
+
+      <footer class="composer">
+        <div id="composerResizeHandle" class="composer-resize-handle" title="拖动改变输入框高度"></div>
+        <div class="composer-head">
+          <div>
+            <h2>输入框组装区</h2>
+            <p>选择节点，或按主线关系生成一段可粘贴回 Codex 的上下文。</p>
+          </div>
+          <div class="composer-actions">
+            <button id="useMainlineOrderBtn" class="ghost-btn" type="button">按主线组装</button>
+            <button id="undoEdgeBtn" class="ghost-btn" type="button" disabled title="Ctrl+Z">撤销</button>
+            <button id="clearComposerBtn" class="ghost-btn" type="button">清空</button>
+            <button id="copyPromptBtn" class="primary-btn" type="button">复制到剪贴板</button>
+          </div>
+        </div>
+        <textarea id="promptBox" spellcheck="false"></textarea>
+      </footer>
+    </div>
+    <script src="./app.js?v=20260615-reset-undo"></script>
+  </body>
+</html>

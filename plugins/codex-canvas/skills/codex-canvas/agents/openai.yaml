@@ -1,0 +1,8 @@
+interface:
+  display_name: "对话画布SKILL"
+  short_description: "把当前 Codex 对话沉淀成可回看的阶段检查点画布"
+  brand_color: "#FF6D5A"
+  default_prompt: "使用 $codex-canvas 为当前 Codex 对话记录阶段检查点画布。"
+
+policy:
+  allow_implicit_invocation: true
