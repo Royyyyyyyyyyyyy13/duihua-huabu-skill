@@ -45,7 +45,7 @@ def recover_session_raw_text(session_id: str | None, workspace_hint: str | None 
     if not weak_nodes:
         return {"ok": True, "updated": 0, "sources": [], "message": "没有需要回填的短原文节点。"}
 
-    transcripts = load_candidate_transcripts(nodes, workspace_hint)
+    transcripts = load_candidate_transcripts(nodes, workspace_hint, session_id=session_id)
     if not transcripts:
         return {"ok": False, "updated": 0, "sources": [], "message": "没有找到可读的 Codex 会话记录。"}
 
@@ -83,12 +83,17 @@ def needs_recovery(node: dict[str, Any]) -> bool:
     return raw_text == summary
 
 
-def load_candidate_transcripts(nodes: list[dict[str, Any]], workspace_hint: str | None) -> list[Transcript]:
+def load_candidate_transcripts(
+    nodes: list[dict[str, Any]],
+    workspace_hint: str | None,
+    session_id: str | None = None,
+) -> list[Transcript]:
     root = codex_home() / "sessions"
     if not root.exists():
         return []
 
     keywords = session_keywords(nodes)
+    session_terms = session_search_terms(session_id)
     files = sorted(root.rglob("*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
     transcripts: list[Transcript] = []
     for path in files[:MAX_FILES * 4]:
@@ -101,7 +106,14 @@ def load_candidate_transcripts(nodes: list[dict[str, Any]], workspace_hint: str 
         if not turns:
             continue
         content_score = score_transcript(turns, keywords)
-        score = meta_score + content_score
+        session_score = score_transcript(turns, session_terms) * 8
+        if not workspace_hint and not session_terms and content_score < 4:
+            continue
+        if not workspace_hint and session_terms and session_score <= 0:
+            continue
+        if workspace_hint and meta_score <= 0 and session_score <= 0:
+            continue
+        score = meta_score + content_score + session_score
         if score <= 0:
             continue
         transcripts.append(Transcript(path=path, score=score, turns=turns))
@@ -109,18 +121,25 @@ def load_candidate_transcripts(nodes: list[dict[str, Any]], workspace_hint: str 
             break
 
     transcripts.sort(key=lambda item: item.score, reverse=True)
-    transcripts.extend(load_memory_transcripts(keywords))
+    transcripts.extend(load_memory_transcripts(keywords, workspace_hint, session_terms))
     transcripts.sort(key=lambda item: item.score, reverse=True)
     return transcripts
 
 
-def load_memory_transcripts(keywords: set[str]) -> list[Transcript]:
+def load_memory_transcripts(
+    keywords: set[str],
+    workspace_hint: str | None,
+    session_terms: set[str],
+) -> list[Transcript]:
     path = codex_home() / "memories" / "raw_memories.md"
     if not path.exists():
         return []
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
+        return []
+    normalized_raw = normalize_text_path(raw)
+    if workspace_hint and normalize_text_path(workspace_hint) not in normalized_raw:
         return []
     chunks = [chunk.strip() for chunk in re.split(r"\n\s*\n", raw) if chunk.strip()]
     turns = [
@@ -129,9 +148,14 @@ def load_memory_transcripts(keywords: set[str]) -> list[Transcript]:
         if any(keyword in chunk.lower() for keyword in keywords)
     ]
     score = score_transcript(turns, keywords)
+    session_score = score_transcript(turns, session_terms) * 8
+    if session_terms and session_score <= 0:
+        return []
+    if not workspace_hint and not session_terms:
+        return []
     if not turns or score <= 0:
         return []
-    return [Transcript(path=path, score=score, turns=turns)]
+    return [Transcript(path=path, score=score + session_score, turns=turns)]
 
 
 def parse_transcript(path: Path, keywords: set[str], workspace_hint: str | None) -> tuple[list[Turn], int]:
@@ -218,6 +242,23 @@ def session_keywords(nodes: list[dict[str, Any]]) -> set[str]:
     return {keyword for keyword in keywords if len(keyword) >= 2}
 
 
+def session_search_terms(session_id: str | None) -> set[str]:
+    text = str(session_id or "").lower()
+    terms = set(re.findall(r"[a-z][a-z0-9_-]{3,}", text))
+    terms.update(re.findall(r"[\u4e00-\u9fff]{2,}", text))
+    stop_terms = {
+        "live",
+        "demo",
+        "test",
+        "smoke",
+        "canvas",
+        "codex",
+        "session",
+        "default",
+    }
+    return {term for term in terms if term not in stop_terms and not term.isdigit() and not re.fullmatch(r"20\d{6,}", term)}
+
+
 def extract_keywords(text: str) -> set[str]:
     words = set(re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", text.lower()))
     chinese = re.findall(r"[\u4e00-\u9fff]{2,}", text)
@@ -241,6 +282,12 @@ def extract_keywords(text: str) -> set[str]:
         "用户",
         "实现",
         "测试",
+        "canvas",
+        "codex",
+        "checkpoint",
+        "skill",
+        "plugin",
+        "插件",
     }
     return {word for word in words if word not in stop_words}
 
@@ -349,6 +396,10 @@ def overlaps(left: range, right: range) -> bool:
 
 def normalize_path(value: str) -> str:
     return str(Path(value).expanduser()).replace("/", "\\").rstrip("\\").lower()
+
+
+def normalize_text_path(value: str) -> str:
+    return str(value or "").replace("/", "\\").rstrip("\\").lower()
 
 
 def memory_timestamp(path: Path) -> str:

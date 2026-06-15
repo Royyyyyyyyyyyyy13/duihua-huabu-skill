@@ -83,11 +83,11 @@ class CanvasHandler(BaseHTTPRequestHandler):
             self.send_json(restore_canvas_state(parts[2], body))
             return
         if len(parts) == 4 and parts[:2] == ["api", "session"] and parts[3] == "bootstrap-anchor":
-            result = bootstrap_anchor_node(parts[2], workspace_hint=str(Path.cwd()))
+            result = bootstrap_anchor_node(parts[2], workspace_hint=body.get("workspaceHint"))
             self.send_json(result)
             return
         if len(parts) == 4 and parts[:2] == ["api", "session"] and parts[3] == "recover-raw-text":
-            result = recover_session_raw_text(parts[2], workspace_hint=str(Path.cwd()))
+            result = recover_session_raw_text(parts[2], workspace_hint=body.get("workspaceHint"))
             self.send_json(result, status=200 if result.get("ok") else 404)
             return
         self.send_error(404)

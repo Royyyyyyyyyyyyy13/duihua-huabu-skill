@@ -38,6 +38,8 @@ python .\plugins\codex-canvas\scripts\checkpoint.py --session demo --auto-link -
 
 默认优先写 `detailMarkdown` 和 `contextText`。`rawText` 只作为短原文证据使用，不作为主要节点内容。
 
+首次在已经进行中的对话里启用画布时，如果画布为空，或者只存在“画布启用”锚点及少量后续 live 节点，插件会先尝试从本机可读 Codex 会话记录里生成回溯节点。没有可靠来源时不会乱补节点；已经存在 `reconstructed` 节点后不会重复回溯。
+
 然后打开：
 
 ```text

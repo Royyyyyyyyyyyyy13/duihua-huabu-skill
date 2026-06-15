@@ -1621,8 +1621,11 @@ function runAnchorBootstrap() {
 
 function shouldRunAnchorBootstrap() {
   if (!state.nodes.length) return true;
-  if (state.nodes.length !== 1 || state.edges.length) return false;
-  const node = state.nodes[0];
+  if (state.nodes.some((node) => node.origin === "reconstructed")) return false;
+  return state.nodes.slice(0, 3).some(isStarterAnchorNode);
+}
+
+function isStarterAnchorNode(node) {
   const text = [
     node.type,
     node.origin,

@@ -34,8 +34,8 @@ class AnchorSource:
 
 def bootstrap_anchor_node(session_id: str | None, workspace_hint: str | None = None) -> dict[str, Any]:
     data = load_session(session_id)
-    starter_node = starter_anchor_node(data)
-    if data.get("nodes") and not starter_node:
+    starter_nodes = starter_anchor_nodes(data)
+    if data.get("nodes") and not starter_nodes:
         return {
             "ok": True,
             "created": False,
@@ -43,8 +43,8 @@ def bootstrap_anchor_node(session_id: str | None, workspace_hint: str | None = N
             "session": data,
         }
 
-    source_hint = infer_workspace_hint(data) if starter_node else None
-    source = find_anchor_source(source_hint or workspace_hint)
+    source_hint = infer_workspace_hint(data) if starter_nodes else None
+    source = find_anchor_source(source_hint or workspace_hint, session_id=session_id)
     if not source:
         return {
             "ok": False,
@@ -61,9 +61,13 @@ def bootstrap_anchor_node(session_id: str | None, workspace_hint: str | None = N
         if previous_node:
             add_edge(session_id, {"from": previous_node.get("id"), "to": node.get("id"), "label": ""})
         previous_node = node
-    if starter_node and previous_node:
-        add_edge(session_id, {"from": previous_node.get("id"), "to": starter_node.get("id"), "label": ""})
-        session = reorder_reconstructed_before_starter(session_id, [node.get("id") for node in nodes], starter_node.get("id"))
+    if starter_nodes and previous_node:
+        add_edge(session_id, {"from": previous_node.get("id"), "to": starter_nodes[0].get("id"), "label": ""})
+        session = reorder_reconstructed_before_existing(
+            session_id,
+            [node.get("id") for node in nodes],
+            [node.get("id") for node in starter_nodes],
+        )
     else:
         session = load_session(session_id)
     return {
@@ -76,14 +80,20 @@ def bootstrap_anchor_node(session_id: str | None, workspace_hint: str | None = N
     }
 
 
-def starter_anchor_node(data: dict[str, Any]) -> dict[str, Any] | None:
+def starter_anchor_nodes(data: dict[str, Any]) -> list[dict[str, Any]]:
     nodes = list(data.get("nodes") or [])
-    edges = list(data.get("edges") or [])
-    if len(nodes) != 1 or edges:
-        return None
-    node = nodes[0]
+    if not nodes:
+        return []
+    if any(node.get("origin") == "reconstructed" for node in nodes):
+        return []
+    if not any(is_starter_anchor(node) for node in nodes[:3]):
+        return []
+    return nodes
+
+
+def is_starter_anchor(node: dict[str, Any]) -> bool:
     if node.get("type") != "anchor" or node.get("origin") != "live":
-        return None
+        return False
     text = "\n".join(
         [
             str(node.get("title") or ""),
@@ -93,8 +103,8 @@ def starter_anchor_node(data: dict[str, Any]) -> dict[str, Any] | None:
         ]
     )
     if "画布启用" in text or "从当前对话开始启用" in text or ("canvas" in text.lower() and "checkpoint" in text.lower()):
-        return node
-    return None
+        return True
+    return False
 
 
 def infer_workspace_hint(data: dict[str, Any]) -> str | None:
@@ -126,17 +136,24 @@ def infer_workspace_hint(data: dict[str, Any]) -> str | None:
         return str(Path(absolute_paths[0]).parent)
 
 
-def reorder_reconstructed_before_starter(
+def reorder_reconstructed_before_existing(
     session_id: str | None,
     reconstructed_ids: list[str],
-    starter_id: str | None,
+    existing_ids: list[str],
 ) -> dict[str, Any]:
     data = load_session(session_id)
     node_by_id = {node.get("id"): node for node in data.get("nodes", [])}
     ordered_ids = [node_id for node_id in reconstructed_ids if node_id in node_by_id]
-    if starter_id in node_by_id:
-        ordered_ids.append(starter_id)
-    ordered_ids.extend(node.get("id") for node in data.get("nodes", []) if node.get("id") not in set(ordered_ids))
+    ordered = set(ordered_ids)
+    for node_id in existing_ids:
+        if node_id in node_by_id and node_id not in ordered:
+            ordered_ids.append(node_id)
+            ordered.add(node_id)
+    for node in data.get("nodes", []):
+        node_id = node.get("id")
+        if node_id not in ordered:
+            ordered_ids.append(node_id)
+            ordered.add(node_id)
     data["nodes"] = [node_by_id[node_id] for node_id in ordered_ids if node_id in node_by_id]
     for index, node in enumerate(data["nodes"]):
         node["x"] = GRID_LEFT + (index % GRID_COLUMNS) * GRID_COLUMN_GAP
@@ -144,9 +161,10 @@ def reorder_reconstructed_before_starter(
     return save_session(session_id, data)
 
 
-def find_anchor_source(workspace_hint: str | None) -> AnchorSource | None:
+def find_anchor_source(workspace_hint: str | None, session_id: str | None = None) -> AnchorSource | None:
     sessions_root = codex_home() / "sessions"
     candidates: list[AnchorSource] = []
+    session_terms = session_search_terms(session_id)
     if sessions_root.exists():
         files = sorted(sessions_root.rglob("*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
         for path in files[:MAX_RECENT_FILES]:
@@ -159,20 +177,56 @@ def find_anchor_source(workspace_hint: str | None) -> AnchorSource | None:
             visible_turns = [turn for turn in turns if turn.text.strip()]
             if len(visible_turns) < 2:
                 continue
+            content = content_score(visible_turns)
+            session_match = session_term_score(visible_turns, session_terms)
+            if not workspace_hint and session_terms and session_match <= 0:
+                continue
+            if not workspace_hint and not session_terms:
+                continue
+            if workspace_hint and meta_score <= 0 and session_match <= 0:
+                continue
             candidates.append(
                 AnchorSource(
                     path=path,
-                    score=meta_score + content_score(visible_turns),
+                    score=meta_score + content + session_match,
                     turns=visible_turns,
                 )
             )
-    memory_source = memory_anchor_source()
+    memory_source = memory_anchor_source(workspace_hint, session_terms)
     if memory_source:
         candidates.append(memory_source)
     if not candidates:
         return None
     candidates.sort(key=lambda item: item.score, reverse=True)
     return candidates[0]
+
+
+def session_search_terms(session_id: str | None) -> set[str]:
+    text = str(session_id or "").lower()
+    terms = set(re.findall(r"[a-z][a-z0-9_-]{3,}", text))
+    terms.update(re.findall(r"[\u4e00-\u9fff]{2,}", text))
+    stop_terms = {
+        "live",
+        "demo",
+        "test",
+        "smoke",
+        "canvas",
+        "codex",
+        "session",
+        "default",
+    }
+    return {term for term in terms if term not in stop_terms and not term.isdigit() and not re.fullmatch(r"20\d{6,}", term)}
+
+
+def session_term_score(turns: list[Turn], terms: set[str]) -> int:
+    if not terms:
+        return 0
+    text = "\n".join(turn.text for turn in turns).lower()
+    score = 0
+    for term in terms:
+        if term in text:
+            score += min(text.count(term), 10) * 8
+    return score
 
 
 def content_score(turns: list[Turn]) -> int:
@@ -184,7 +238,7 @@ def content_score(turns: list[Turn]) -> int:
     return score
 
 
-def memory_anchor_source() -> AnchorSource | None:
+def memory_anchor_source(workspace_hint: str | None, session_terms: set[str]) -> AnchorSource | None:
     path = codex_home() / "memories" / "raw_memories.md"
     if not path.exists():
         return None
@@ -194,9 +248,21 @@ def memory_anchor_source() -> AnchorSource | None:
         return None
     if not raw:
         return None
+    normalized_raw = normalize_text_path(raw)
+    if workspace_hint and normalize_text_path(workspace_hint) not in normalized_raw:
+        return None
     chunks = [chunk.strip() for chunk in raw.split("\n\n") if chunk.strip()]
     turns = [Turn(timestamp="memory", role="assistant", text=chunk) for chunk in chunks[-8:]]
-    return AnchorSource(path=path, score=10 + content_score(turns), turns=turns)
+    session_score = session_term_score(turns, session_terms)
+    if session_terms and session_score <= 0:
+        return None
+    if not workspace_hint and not session_terms:
+        return None
+    return AnchorSource(path=path, score=10 + content_score(turns) + session_score, turns=turns)
+
+
+def normalize_text_path(value: str) -> str:
+    return str(value or "").replace("/", "\\").rstrip("\\").lower()
 
 
 def build_reconstructed_nodes(source: AnchorSource) -> list[dict[str, Any]]:

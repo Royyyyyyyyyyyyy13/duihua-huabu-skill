@@ -25,6 +25,8 @@ A checkpoint is appropriate when one of these happens:
 
 When the canvas is empty but the current Codex conversation is already underway, reconstruct only the useful amount of history before normal live checkpointing begins.
 
+If the canvas already contains only a `画布启用` starter anchor, or that starter anchor plus a few early `live` checkpoints, and there are still no `reconstructed` nodes, this is not "history already handled". Try to reconstruct useful prior history first, then keep the existing live nodes after the reconstructed nodes.
+
 Do not force a minimum number such as 3 reconstructed nodes. Choose the count from the actual amount of meaningful prior conversation:
 
 - If there is no reliable prior context, create no reconstructed node and let the next real checkpoint start the canvas.

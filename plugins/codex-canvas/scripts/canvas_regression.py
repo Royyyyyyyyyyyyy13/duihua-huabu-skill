@@ -18,7 +18,7 @@ WORKSPACE = ROOT.parents[1]
 SCRIPTS = ROOT / "scripts"
 SESSION = "codex-canvas-smoke"
 SERVER = "http://127.0.0.1:8765"
-VERSION = "20260615-reset-undo"
+VERSION = "20260615-history-source-guard"
 
 
 def main() -> int:
@@ -29,7 +29,10 @@ def main() -> int:
         check_static_files,
         check_store_invariants,
         check_anchor_no_source,
+        check_anchor_no_false_match,
+        check_recover_no_false_match,
         check_anchor_starter_backfill,
+        check_anchor_starter_with_live_nodes_backfill,
         check_checkpoint_stdin_guard,
         check_live_server,
         check_browser_ui,
@@ -67,8 +70,13 @@ def check_static_files() -> None:
     html = (ROOT / "assets" / "canvas" / "index.html").read_text(encoding="utf-8")
     app = (ROOT / "assets" / "canvas" / "app.js").read_text(encoding="utf-8")
     css = (ROOT / "assets" / "canvas" / "styles.css").read_text(encoding="utf-8")
+    server = (SCRIPTS / "canvas_server.py").read_text(encoding="utf-8")
+    skill = (ROOT / "skills" / "codex-canvas" / "SKILL.md").read_text(encoding="utf-8")
     assert_true(VERSION in html, "index.html did not reference the current asset version")
     assert_true("anchorBootstrapBlocked" in app, "app.js missing anchor bootstrap block guard")
+    assert_true("state.nodes.slice(0, 3).some(isStarterAnchorNode)" in app, "app.js should bootstrap starter plus early live nodes")
+    assert_true('workspace_hint=body.get("workspaceHint")' in server, "server should not use its cwd as the conversation workspace")
+    assert_true("starter anchor plus a few early `live` checkpoints" in skill, "skill should require backfill after starter anchors")
     assert_true("estimate_reconstruction_count" in (SCRIPTS / "conversation_anchor.py").read_text(encoding="utf-8"), "adaptive reconstruction count missing")
     assert_true("布局保存失败，已先保留在本地" in app, "app.js missing layout save failure handling")
     assert_true('document.removeEventListener("pointerup", onEnd)' in app, "resize pointerup cleanup missing")
@@ -177,6 +185,96 @@ def check_anchor_no_source() -> None:
         )
 
 
+def check_anchor_no_false_match() -> None:
+    with temp_env(
+        CODEX_HOME=tempfile.mkdtemp(prefix="codex-false-match-"),
+        CODEX_CANVAS_HOME=tempfile.mkdtemp(prefix="canvas-false-match-"),
+    ):
+        codex_root = Path(os.environ["CODEX_HOME"])
+        memory = codex_root / "memories" / "raw_memories.md"
+        memory.parent.mkdir(parents=True, exist_ok=True)
+        memory.write_text("codex canvas checkpoint 插件开发记录，和 unrelated 会话无关。" * 8, encoding="utf-8")
+        transcript = codex_root / "sessions" / "2026" / "06" / "15" / "rollout-canvas-dev.jsonl"
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        turns = [
+            {"type": "session_meta", "payload": {"cwd": r"E:\画布SKILL"}},
+            {
+                "type": "event_msg",
+                "timestamp": "2026-06-15T11:00:00+08:00",
+                "payload": {
+                    "type": "user_message",
+                    "message": "继续检查 codex canvas checkpoint 插件，修复画布节点和连线交互。" * 5,
+                },
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "2026-06-15T11:00:30+08:00",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "已修复 canvas bootstrap 和 checkpoint 回归测试。" * 5,
+                },
+            },
+        ]
+        transcript.write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in turns), encoding="utf-8")
+
+        from conversation_anchor import bootstrap_anchor_node
+
+        result = bootstrap_anchor_node("20260615-unrelated-live")
+        assert_equal(result["created"], False, "bootstrap should not use generic canvas terms to backfill unrelated sessions")
+        assert_equal(len(result["session"]["nodes"]), 0, "generic false match should not create nodes")
+
+
+def check_recover_no_false_match() -> None:
+    with temp_env(
+        CODEX_HOME=tempfile.mkdtemp(prefix="codex-recover-false-"),
+        CODEX_CANVAS_HOME=tempfile.mkdtemp(prefix="canvas-recover-false-"),
+    ):
+        codex_root = Path(os.environ["CODEX_HOME"])
+        memory = codex_root / "memories" / "raw_memories.md"
+        memory.parent.mkdir(parents=True, exist_ok=True)
+        memory.write_text("codex canvas checkpoint 插件调试记录，不能被 unrelated 会话当成原文。" * 8, encoding="utf-8")
+        transcript = codex_root / "sessions" / "2026" / "06" / "15" / "rollout-canvas-dev.jsonl"
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        turns = [
+            {"type": "session_meta", "payload": {"cwd": r"E:\画布SKILL"}},
+            {
+                "type": "event_msg",
+                "timestamp": "2026-06-15T11:10:00+08:00",
+                "payload": {
+                    "type": "user_message",
+                    "message": "codex canvas checkpoint 插件详情回填调试。" * 5,
+                },
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "2026-06-15T11:10:30+08:00",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "已检查 canvas rawText recover 逻辑。" * 5,
+                },
+            },
+        ]
+        transcript.write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in turns), encoding="utf-8")
+
+        from canvas_store import add_node
+        from transcript_recovery import recover_session_raw_text
+
+        add_node(
+            "20260615-unrelated-live",
+            {
+                "type": "anchor",
+                "title": "画布启用",
+                "summary": "从当前对话开始启用 Codex Canvas。",
+                "rawText": "从当前对话开始启用 Codex Canvas。",
+                "origin": "live",
+                "tags": ["canvas", "checkpoint"],
+            },
+        )
+        result = recover_session_raw_text("20260615-unrelated-live")
+        assert_equal(result["ok"], False, "recover should not use generic canvas terms to fill unrelated rawText")
+        assert_equal(result["updated"], 0, "generic false recover should not update nodes")
+
+
 def check_anchor_starter_backfill() -> None:
     with temp_env(
         CODEX_HOME=tempfile.mkdtemp(prefix="codex-starter-"),
@@ -239,6 +337,82 @@ def check_anchor_starter_backfill() -> None:
         assert_true(
             any(str(transcript) in ref for node in data["nodes"] for ref in node.get("evidenceRefs", [])),
             "starter backfill did not use inferred workspace transcript",
+        )
+
+
+def check_anchor_starter_with_live_nodes_backfill() -> None:
+    with temp_env(
+        CODEX_HOME=tempfile.mkdtemp(prefix="codex-starter-live-"),
+        CODEX_CANVAS_HOME=tempfile.mkdtemp(prefix="canvas-starter-live-"),
+    ):
+        codex_root = Path(os.environ["CODEX_HOME"])
+        transcript = codex_root / "sessions" / "2026" / "06" / "15" / "rollout-toucaicai-live.jsonl"
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        turns = [
+            {"type": "session_meta", "payload": {"cwd": r"E:\GAME"}},
+        ]
+        for index in range(10):
+            turns.append(
+                {
+                    "type": "event_msg",
+                    "timestamp": f"2026-06-15T12:{index:02d}:00+08:00",
+                    "payload": {
+                        "type": "user_message",
+                        "message": f"toucaicai 第{index}轮需求：确认偷菜肉鸽玩法、经济压力、作物流派和发布 UI。" * 4,
+                    },
+                }
+            )
+            turns.append(
+                {
+                    "type": "event_msg",
+                    "timestamp": f"2026-06-15T12:{index:02d}:30+08:00",
+                    "payload": {
+                        "type": "agent_message",
+                        "message": f"toucaicai 第{index}轮实现：完成版本开发、验证、平衡调整和发布说明。" * 4,
+                    },
+                }
+            )
+        transcript.write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in turns), encoding="utf-8")
+
+        from canvas_store import add_edge, add_node, load_session
+        from conversation_anchor import bootstrap_anchor_node
+
+        add_node(
+            "20260615-toucaicai-live",
+            {
+                "id": "live_anchor",
+                "type": "anchor",
+                "title": "画布启用",
+                "summary": "从当前对话开始启用 Codex Canvas。",
+                "detailMarkdown": "## 当前项目状态\n- 项目目录：E:\\GAME。\n- 已经进入 live checkpoint。",
+                "contextText": "画布启用。",
+                "origin": "live",
+                "tags": ["canvas", "checkpoint"],
+            },
+        )
+        add_node(
+            "20260615-toucaicai-live",
+            {
+                "id": "live_followup",
+                "type": "implementation",
+                "title": "早期节点",
+                "summary": "启用后马上形成的 live 节点。",
+                "contextText": "早期 live 节点。",
+                "origin": "live",
+            },
+        )
+        add_edge("20260615-toucaicai-live", {"from": "live_anchor", "to": "live_followup", "label": ""})
+
+        result = bootstrap_anchor_node("20260615-toucaicai-live")
+        assert_equal(result["created"], True, "starter plus early live nodes should still allow historical backfill")
+        data = load_session("20260615-toucaicai-live")
+        assert_equal(data["nodes"][0]["origin"], "reconstructed", "reconstructed nodes should come before existing live nodes")
+        assert_equal(data["nodes"][-2]["id"], "live_anchor", "starter anchor should remain before later live node")
+        assert_equal(data["nodes"][-1]["id"], "live_followup", "early live node should remain after starter anchor")
+        assert_equal(len(data["edges"]), len(data["nodes"]) - 1, "backfill should preserve a complete mainline")
+        assert_true(
+            any(str(transcript) in ref for node in data["nodes"] for ref in node.get("evidenceRefs", [])),
+            "starter plus live backfill did not use the matching transcript",
         )
 
 
