@@ -1,6 +1,6 @@
 {
   "name": "codex-canvas",
-  "version": "0.1.2+codex.20260615181324",
+  "version": "0.1.3+codex.20260616184950",
   "description": "\u5bf9\u8bdd\u753b\u5e03SKILL\uff1a\u628a\u5f53\u524d Codex \u5bf9\u8bdd\u6c89\u6dc0\u6210\u9636\u6bb5\u68c0\u67e5\u70b9\u753b\u5e03\uff0c\u652f\u6301\u8282\u70b9\u3001\u8fde\u7ebf\u3001\u8be6\u60c5\u9762\u677f\u548c\u8f93\u5165\u6846\u7ec4\u88c5\u3002",
   "author": {
     "name": "Local developer"

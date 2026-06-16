@@ -87,7 +87,7 @@ At the end of each substantial turn:
 3. Include `detailMarkdown` for the right panel and `contextText` for prompt assembly. Keep `contextText` concise.
 4. Use `source=mixed` when both user feedback and assistant implementation shaped the phase.
 5. Use `origin=live` for normal new checkpoints.
-6. Mention briefly in the final response that a checkpoint was recorded.
+6. Mention briefly in the final response that a checkpoint was recorded, unless a user or global instruction asks for silent canvas recording. In silent mode, do not mention successful checkpoint writes; only mention failures, blockers, or canvas status when the user asks.
 
 Do not create a checkpoint for quick clarifications, pure status replies, or tiny wording-only answers.
 

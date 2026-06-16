@@ -40,6 +40,8 @@ python .\plugins\codex-canvas\scripts\checkpoint.py --session demo --auto-link -
 
 首次在已经进行中的对话里启用画布时，如果画布为空，或者只存在“画布启用”锚点及少量后续 live 节点，插件会先尝试从本机可读 Codex 会话记录里生成回溯节点。没有可靠来源时不会乱补节点；已经存在 `reconstructed` 节点后不会重复回溯。
 
+如果用户在全局 `AGENTS.md` 或当前对话里要求“静默启用画布”，Skill 会继续记录 checkpoint，但不会在每次成功写入后提示用户。只有记录失败、出现阻塞，或用户主动询问画布状态时，才说明画布状态。
+
 然后打开：
 
 ```text
