@@ -384,6 +384,12 @@ function discussionNode() {
     x: wrapsToNextRow ? GRID_LEFT : latestX + GRID_COLUMN_GAP,
     y: wrapsToNextRow ? latestY + GRID_ROW_GAP : latestY,
   });
+  discussionPosition = {
+    anchorKey,
+    x: candidate.x,
+    y: candidate.y,
+  };
+  saveDiscussionPosition();
   return {
     id: DISCUSSION_NODE_ID,
     type: "discussion",
@@ -393,10 +399,6 @@ function discussionNode() {
 }
 
 function discussionAnchorNodes() {
-  const selectedIds = state.nodes
-    .map((node) => node.id)
-    .filter((nodeId) => selectedNodeIds.has(nodeId));
-  if (selectedIds.length) return selectedIds.map(nodeById).filter(Boolean);
   const terminal = mainlineTerminalNode();
   return terminal ? [terminal] : [];
 }

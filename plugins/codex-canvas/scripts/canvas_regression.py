@@ -18,7 +18,7 @@ WORKSPACE = ROOT.parents[1]
 SCRIPTS = ROOT / "scripts"
 SESSION = "codex-canvas-smoke"
 SERVER = "http://127.0.0.1:8765"
-VERSION = "20260623-no-discussion-edge"
+VERSION = "20260623-stable-discussion-node"
 
 
 def main() -> int:
@@ -601,6 +601,15 @@ def check_browser_interactions() -> None:
         )
         assert_equal(after_select_edge_state["discussionEdges"], 0, "selecting a node should not render a discussion edge")
         assert_equal(after_select_edge_state["formalEdges"], 3, "selecting a node should not change formal edges")
+
+        stable_discussion = browser_eval_json(
+            npx,
+            browser_session,
+            '(function(){const before=discussionNode();selectOnlyNode("ui_1");const moved=nodeById("ui_1");moved.x+=160;moved.y+=70;render();const after=discussionNode();return JSON.stringify({before:{x:before.x,y:before.y},after:{x:after.x,y:after.y},discussionLeft:document.querySelector(".discussion-node").style.left,discussionTop:document.querySelector(".discussion-node").style.top});})()',
+        )
+        assert_equal(stable_discussion["after"], stable_discussion["before"], "discussion node should not follow selected node movement")
+        assert_equal(stable_discussion["discussionLeft"], f"{stable_discussion['before']['x']}px", "discussion node DOM x should stay fixed")
+        assert_equal(stable_discussion["discussionTop"], f"{stable_discussion['before']['y']}px", "discussion node DOM y should stay fixed")
 
         reset = browser_eval_json(
             npx,
