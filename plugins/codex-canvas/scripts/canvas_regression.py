@@ -18,7 +18,7 @@ WORKSPACE = ROOT.parents[1]
 SCRIPTS = ROOT / "scripts"
 SESSION = "codex-canvas-smoke"
 SERVER = "http://127.0.0.1:8765"
-VERSION = "20260615-history-source-guard"
+VERSION = "20260623-no-discussion-edge"
 
 
 def main() -> int:
@@ -548,7 +548,7 @@ def check_browser_ui() -> None:
         assert_equal(ui["formalNodes"], expected_nodes, "browser formal node count mismatch")
         assert_equal(ui["formalEdges"], expected_edges, "browser formal edge count mismatch")
         assert_equal(ui["discussionNodes"], 1 if expected_nodes else 0, "browser discussion node count mismatch")
-        assert_equal(ui["discussionEdges"], 1 if expected_nodes else 0, "browser discussion edge count mismatch")
+        assert_equal(ui["discussionEdges"], 0, "browser should not render default discussion edge")
         assert_equal(ui["regressionTitle"], 1, "browser missing regression checkpoint node")
         assert_equal(ui["tagOverflow"], False, "browser node tags overflow")
         assert_equal(ui["bodyOverflow"], False, "browser body has horizontal overflow")
@@ -593,6 +593,14 @@ def check_browser_interactions() -> None:
         )
         assert_equal(selected["detail"], "交互一", "node click did not show detail")
         assert_true("交互一" in selected["prompt"], "add selected node did not update prompt")
+
+        after_select_edge_state = browser_eval_json(
+            npx,
+            browser_session,
+            'JSON.stringify({discussionEdges:document.querySelectorAll(".edge-path.discussion-edge").length,formalEdges:document.querySelectorAll(".edge-path:not(.discussion-edge)").length})',
+        )
+        assert_equal(after_select_edge_state["discussionEdges"], 0, "selecting a node should not render a discussion edge")
+        assert_equal(after_select_edge_state["formalEdges"], 3, "selecting a node should not change formal edges")
 
         reset = browser_eval_json(
             npx,

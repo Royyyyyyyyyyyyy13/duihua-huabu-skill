@@ -502,7 +502,6 @@ function renderEdges() {
     edgesLayer.appendChild(visible);
     endpointControls.push(sourceHandle, targetHandle);
   }
-  renderDiscussionEdge();
   renderConnectPreview();
   renderReconnectPreview();
   for (const control of endpointControls) {
@@ -574,21 +573,6 @@ function createMarker(id, fill) {
   arrow.setAttribute("fill", fill);
   marker.appendChild(arrow);
   return marker;
-}
-
-function renderDiscussionEdge() {
-  const anchors = discussionAnchorNodes();
-  if (!anchors.length) return;
-  const target = discussionNode();
-  for (const anchor of anchors) {
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", edgePath(anchor, target));
-    path.setAttribute("class", "edge-path discussion-edge");
-    path.setAttribute("data-end-x", String(target.x || 0));
-    path.setAttribute("data-end-y", String((target.y || 0) + NODE_HEIGHT / 2));
-    path.setAttribute("marker-end", "url(#discussionArrowMarker)");
-    edgesLayer.appendChild(path);
-  }
 }
 
 function renderConnectPreview() {
