@@ -1,38 +1,54 @@
 {
-  "schemaVersion": "number",
-  "sessionId": "string",
-  "createdByPluginVersion": "string",
-  "lastOpenedByPluginVersion": "string",
-  "updatedAt": "ISO-8601 datetime",
-  "nodes": [
-    {
-      "id": "string",
-      "type": "anchor | requirement | decision | plan | implementation | verification | blocker | artifact | note",
-      "title": "string",
-      "summary": "string",
-      "detailMarkdown": "string",
-      "contextText": "string",
-      "rawText": "string",
-      "source": "user | assistant | mixed",
-      "origin": "live | reconstructed | imported",
-      "confidence": "high | medium | low",
-      "relatedFiles": ["string"],
-      "evidenceRefs": ["string"],
-      "tags": ["string"],
-      "status": "active | resolved | archived",
-      "x": "number",
-      "y": "number",
-      "createdAt": "ISO-8601 datetime"
-    }
-  ],
-  "edges": [
-    {
-      "id": "string",
-      "from": "node id",
-      "to": "node id",
-      "label": "string",
-      "createdAt": "ISO-8601 datetime"
-    }
-  ],
-  "composerOrder": ["node id"]
+  "schemaVersion": 2,
+  "session": {
+    "sessionId": "string",
+    "revision": "non-negative integer; increments on every persisted mutation",
+    "contentRevision": "non-negative integer; increments when checkpoint content changes",
+    "createdByPluginVersion": "string",
+    "lastOpenedByPluginVersion": "string",
+    "updatedAt": "ISO-8601 datetime",
+    "nodes": "CheckpointNode[]",
+    "edges": "CanvasEdge[]",
+    "composerOrder": "node id[]",
+    "viewState": {
+      "composerMode": "mainline | manual",
+      "discussion": {
+        "mode": "auto | manual",
+        "anchorIds": "node id[]",
+        "position": "{x:number,y:number} | null",
+        "positionMode": "auto | manual",
+        "anchorKey": "string"
+      }
+    },
+    "migrations": "MigrationRecord[]"
+  },
+  "CheckpointNode": {
+    "id": "string",
+    "type": "anchor | requirement | decision | plan | implementation | verification | blocker | artifact | note",
+    "title": "string",
+    "summary": "string",
+    "detailMarkdown": "string",
+    "contextText": "string",
+    "rawText": "string",
+    "contentQuality": "full | compact | fallback",
+    "source": "user | assistant | mixed",
+    "origin": "live | reconstructed | imported",
+    "confidence": "high | medium | low",
+    "relatedFiles": "string[]",
+    "evidenceRefs": "string[]",
+    "tags": "string[]",
+    "status": "active | resolved | archived",
+    "x": "number",
+    "y": "number",
+    "createdAt": "ISO-8601 datetime",
+    "updatedAt": "ISO-8601 datetime"
+  },
+  "CanvasEdge": {
+    "id": "string",
+    "from": "node id",
+    "to": "node id",
+    "label": "string",
+    "createdAt": "ISO-8601 datetime",
+    "updatedAt": "ISO-8601 datetime"
+  }
 }

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import http.client
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -16,9 +20,6 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE = ROOT.parents[1]
 SCRIPTS = ROOT / "scripts"
-SESSION = "codex-canvas-smoke"
-SERVER = "http://127.0.0.1:8765"
-VERSION = "20260623-stable-discussion-node"
 
 
 def main() -> int:
@@ -26,17 +27,17 @@ def main() -> int:
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     sys.path.insert(0, str(SCRIPTS))
     checks = [
-        check_static_files,
-        check_store_invariants,
+        check_v2_static_files,
+        check_v2_store_invariants,
+        check_v2_checkpoint_json_aliases,
+        check_v2_concurrent_writes,
         check_anchor_no_source,
         check_anchor_no_false_match,
         check_recover_no_false_match,
         check_anchor_starter_backfill,
         check_anchor_starter_with_live_nodes_backfill,
         check_checkpoint_stdin_guard,
-        check_live_server,
-        check_browser_ui,
-        check_browser_interactions,
+        check_v2_isolated_server,
     ]
     failures: list[str] = []
     for check in checks:
@@ -55,8 +56,15 @@ def main() -> int:
     return 0
 
 
-def check_static_files() -> None:
-    run(["node", "--check", str(ROOT / "assets" / "canvas" / "app.js")])
+def check_v2_static_files() -> None:
+    frontend = ROOT / "frontend"
+    npm = shutil.which("npm.cmd") or shutil.which("npm.exe") or shutil.which("npm")
+    if not npm:
+        raise AssertionError("npm is required for frontend validation")
+    run_cli([npm, "--prefix", str(frontend), "run", "build"])
+    run_cli([npm, "--prefix", str(frontend), "test"])
+    run_cli([npm, "--prefix", str(frontend), "run", "notices"])
+
     for script_name in [
         "canvas_server.py",
         "canvas_store.py",
@@ -66,83 +74,120 @@ def check_static_files() -> None:
     ]:
         script_path = SCRIPTS / script_name
         compile(script_path.read_text(encoding="utf-8"), str(script_path), "exec")
-    json.loads((ROOT / "data" / "schema.json").read_text(encoding="utf-8"))
-    html = (ROOT / "assets" / "canvas" / "index.html").read_text(encoding="utf-8")
-    app = (ROOT / "assets" / "canvas" / "app.js").read_text(encoding="utf-8")
-    css = (ROOT / "assets" / "canvas" / "styles.css").read_text(encoding="utf-8")
-    server = (SCRIPTS / "canvas_server.py").read_text(encoding="utf-8")
-    skill = (ROOT / "skills" / "codex-canvas" / "SKILL.md").read_text(encoding="utf-8")
-    assert_true(VERSION in html, "index.html did not reference the current asset version")
-    assert_true("anchorBootstrapBlocked" in app, "app.js missing anchor bootstrap block guard")
-    assert_true("state.nodes.slice(0, 3).some(isStarterAnchorNode)" in app, "app.js should bootstrap starter plus early live nodes")
-    assert_true('workspace_hint=body.get("workspaceHint")' in server, "server should not use its cwd as the conversation workspace")
-    assert_true("starter anchor plus a few early `live` checkpoints" in skill, "skill should require backfill after starter anchors")
-    assert_true("estimate_reconstruction_count" in (SCRIPTS / "conversation_anchor.py").read_text(encoding="utf-8"), "adaptive reconstruction count missing")
-    assert_true("布局保存失败，已先保留在本地" in app, "app.js missing layout save failure handling")
-    assert_true('document.removeEventListener("pointerup", onEnd)' in app, "resize pointerup cleanup missing")
-    assert_true(".tag-list .tag" in css and "min-width: 0" in css, "chip overflow fix missing")
+
+    schema = json.loads((ROOT / "data" / "schema.json").read_text(encoding="utf-8"))
+    assert_equal(schema["schemaVersion"], 2, "schema version")
+    notices = (WORKSPACE / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    plugin_notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    assert_true("## License Texts" in notices, "third-party license texts missing")
+    assert_true("`dompurify@3.4.11`" in notices, "DOMPurify license notice missing")
+    assert_equal(plugin_notices, notices, "plugin and repository license notices differ")
+    assert_true((ROOT / "LICENSE").is_file(), "plugin package license missing")
+    assert_true("positionMode" in schema["session"]["viewState"]["discussion"], "discussion position mode missing")
+
+    web_root = ROOT / "assets" / "canvas"
+    html = (web_root / "index.html").read_text(encoding="utf-8")
+    js_match = re.search(r'src="\./([^\"]+\.js)"', html)
+    css_match = re.search(r'href="\./([^\"]+\.css)"', html)
+    assert_true(bool(js_match and css_match), "hashed Vite assets missing from built index")
+    assert_true((web_root / js_match.group(1)).is_file(), "built JavaScript asset missing")
+    assert_true((web_root / css_match.group(1)).is_file(), "built CSS asset missing")
+    assert_true((web_root / "favicon.svg").is_file(), "favicon missing")
+    assert_true(not (web_root / "app.js").exists(), "legacy app.js should not remain")
+    assert_true(not (web_root / "styles.css").exists(), "legacy styles.css should not remain")
+
+    app_source = (frontend / "src" / "App.vue").read_text(encoding="utf-8")
+    graph_source = (frontend / "src" / "lib" / "graph.js").read_text(encoding="utf-8")
+    assert_true(':selection-key-code="true"' in app_source, "Vue Flow lasso configuration missing")
+    assert_true("selection-on-drag" not in app_source, "unsupported Vue Flow selection prop returned")
+    assert_true("clonePlain" in app_source, "reactive history snapshot guard missing")
+    assert_true("positionMode" in app_source and "positionMode" in graph_source, "discussion collision state missing")
+    assert_true('window.addEventListener("resize", onViewportResize)' in app_source, "responsive canvas refit missing")
+    assert_true("删除选中关系" in app_source, "selected-edge delete command missing")
+    assert_true((frontend / "tests" / "browser-regression.js").is_file(), "browser regression script missing")
 
 
-def check_store_invariants() -> None:
-    with temp_env(CODEX_CANVAS_HOME=tempfile.mkdtemp(prefix="canvas-regression-")):
-        from canvas_store import add_edge, add_node, load_session, reset_canvas, session_path
+def check_v2_store_invariants() -> None:
+    with tempfile.TemporaryDirectory(prefix="canvas-v2-store-") as root, temp_env(CODEX_CANVAS_HOME=root):
+        from canvas_store import (
+            add_edge,
+            add_node,
+            load_session,
+            reset_canvas,
+            restore_canvas_state,
+            safe_session_id,
+            session_path,
+            update_view_state,
+        )
 
         add_node(
-            "store",
+            "store-v2",
             {
                 "id": "n1",
                 "type": "requirement",
-                "title": "初始",
-                "summary": "摘要",
-                "contextText": "短上下文",
-                "tags": ["a"],
+                "title": "需求",
+                "summary": "保留摘要",
+                "contextText": "压缩上下文",
             },
         )
-        updated = add_node("store", {"id": "n1", "title": "更新标题"})
-        data = load_session("store")
-        assert_equal(data["schemaVersion"], 1, "session schema version missing")
-        assert_true("+codex." in data["createdByPluginVersion"], "new session createdByPluginVersion missing")
-        assert_true("+codex." in data["lastOpenedByPluginVersion"], "new session lastOpenedByPluginVersion missing")
-        assert_equal(len(data["nodes"]), 1, "duplicate node id appended a second node")
-        assert_equal(updated["summary"], "摘要", "partial duplicate node update cleared summary")
-        assert_equal(updated["contextText"], "短上下文", "partial duplicate node update cleared contextText")
-        assert_equal(updated["type"], "requirement", "partial duplicate node update changed type")
-        assert_equal(updated["origin"], "live", "default node origin should be live")
-        assert_equal(updated["confidence"], "high", "default node confidence should be high")
+        updated = add_node("store-v2", {"id": "n1", "title": "需求更新"})
+        assert_equal(updated["summary"], "保留摘要", "partial node update cleared summary")
+        assert_equal(updated["contextText"], "压缩上下文", "partial node update cleared context")
+        add_node("store-v2", {"id": "n2", "type": "decision", "title": "决策", "summary": "二"})
+        add_node("store-v2", {"id": "n3", "type": "verification", "title": "验证", "summary": "三"})
+        add_edge("store-v2", {"id": "e12", "from": "n1", "to": "n2"})
+        add_edge("store-v2", {"id": "e23", "from": "n2", "to": "n3"})
+        duplicate = add_edge("store-v2", {"id": "duplicate", "from": "n1", "to": "n2"})
+        assert_equal(duplicate["id"], "e12", "duplicate edge should return stored edge")
+        try:
+            add_edge("store-v2", {"id": "cycle", "from": "n3", "to": "n1"})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("cycle edge was accepted")
 
-        n2 = add_node(
-            "store",
+        view = update_view_state(
+            "store-v2",
             {
-                "id": "n2",
-                "type": "verification",
-                "title": "二",
-                "summary": "二",
-                "origin": "reconstructed",
-                "confidence": "medium",
+                "discussion": {
+                    "mode": "manual",
+                    "anchorIds": ["n2"],
+                    "position": {"x": 940, "y": 540},
+                    "positionMode": "manual",
+                    "anchorKey": "n2",
+                }
             },
         )
-        assert_equal(n2["origin"], "reconstructed", "explicit reconstructed origin not stored")
-        assert_equal(n2["confidence"], "medium", "explicit confidence not stored")
-        edge1 = add_edge("store", {"from": "n1", "to": "n2", "id": "edge-a"})
-        edge2 = add_edge("store", {"from": "n1", "to": "n2", "id": "edge-b"})
-        data = load_session("store")
-        assert_equal(len(data["edges"]), 1, "duplicate edge appended a second edge")
-        assert_equal(edge2["id"], edge1["id"], "duplicate edge returned an unsaved new id")
+        assert_equal(view["viewState"]["discussion"]["positionMode"], "manual", "manual position mode not stored")
+        before = load_session("store-v2")
+        snapshot = {
+            "nodeIds": [node["id"] for node in before["nodes"]],
+            "positions": {node["id"]: {"x": node["x"], "y": node["y"]} for node in before["nodes"]},
+            "edges": before["edges"],
+            "discussion": before["viewState"]["discussion"],
+        }
+        reset = reset_canvas("store-v2")
+        assert_equal(len(reset["nodes"]), 3, "reset changed node count")
+        assert_equal(len(reset["edges"]), 2, "reset did not rebuild mainline")
+        assert_equal(reset["viewState"]["discussion"]["positionMode"], "auto", "reset did not restore auto discussion position")
+        add_node("store-v2", {"id": "n4", "type": "artifact", "title": "新增", "summary": "四"})
+        add_edge("store-v2", {"id": "e34", "from": "n3", "to": "n4"})
+        restored = restore_canvas_state("store-v2", snapshot)
+        assert_equal(len(restored["nodes"]), 4, "undo reset lost a newly generated node")
+        assert_true(any(edge["from"] == "n3" and edge["to"] == "n4" for edge in restored["edges"]), "undo reset lost new-node edge")
+        assert_equal(restored["viewState"]["discussion"]["positionMode"], "manual", "undo reset lost discussion position mode")
+        assert_equal(restored["schemaVersion"], 2, "store schema version")
+        assert_true(restored["revision"] > 0 and restored["contentRevision"] > 0, "session revisions did not advance")
 
-        reset = reset_canvas("store")
-        assert_equal(len(reset["nodes"]), 2, "reset changed node count")
-        assert_equal(len(reset["edges"]), 1, "reset did not rebuild one mainline edge")
-        assert_equal(reset["nodes"][0]["x"], 80, "reset did not restore first node x")
-        assert_equal(reset["nodes"][1]["x"], 430, "reset did not restore second node x")
-
-        legacy_path = session_path("legacy")
+        legacy_id = "中文 会话"
+        legacy_path = session_path(legacy_id)
         legacy_path.parent.mkdir(parents=True, exist_ok=True)
         legacy_path.write_text(
             json.dumps(
                 {
-                    "sessionId": "legacy",
-                    "updatedAt": "2026-06-01T00:00:00+08:00",
-                    "nodes": [{"id": "old", "type": "note", "title": "旧", "summary": "旧摘要"}],
+                    "schemaVersion": 1,
+                    "sessionId": "stale-copy-name",
+                    "nodes": [{"id": "old", "type": "note", "title": "旧节点", "summary": "旧摘要"}],
                     "edges": [],
                     "composerOrder": [],
                 },
@@ -150,17 +195,315 @@ def check_store_invariants() -> None:
             ),
             encoding="utf-8",
         )
-        legacy = load_session("legacy")
-        assert_equal(legacy["schemaVersion"], 1, "legacy session was not migrated to schema version 1")
-        assert_equal(legacy["createdByPluginVersion"], "unknown", "legacy createdByPluginVersion should not pretend to be current")
-        assert_true(
-            "+codex." in legacy["lastOpenedByPluginVersion"],
-            "legacy lastOpenedByPluginVersion should track the migrating plugin",
+        legacy = load_session(legacy_id)
+        assert_equal(legacy["sessionId"], safe_session_id(legacy_id), "requested session id did not override copied metadata")
+        assert_equal(legacy["schemaVersion"], 2, "legacy session was not migrated")
+        assert_equal(legacy["nodes"][0]["contentQuality"], "fallback", "legacy content quality missing")
+        assert_true(bool(legacy["nodes"][0]["detailMarkdown"]), "legacy detail fallback missing")
+        assert_equal(legacy["viewState"]["discussion"]["positionMode"], "auto", "legacy discussion position mode missing")
+        backups = list(legacy_path.parent.glob(f"{legacy_path.stem}.schema-1-backup-*.json"))
+        assert_equal(len(backups), 1, "legacy migration backup count")
+
+
+def check_v2_checkpoint_json_aliases() -> None:
+    with tempfile.TemporaryDirectory(prefix="canvas-v2-json-") as root:
+        env = os.environ.copy()
+        env.update({"CODEX_CANVAS_HOME": root, "PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1"})
+        payload = {
+            "sessionId": "批量 会话",
+            "autoLink": True,
+            "nodes": [
+                {"id": "j1", "type": "requirement", "title": "批量一", "summary": "一", "contextText": "上下文一"},
+                {"id": "j2", "type": "decision", "title": "批量二", "summary": "二", "detailMarkdown": "## 二"},
+            ],
+        }
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / "checkpoint.py"), "--stdin-json"],
+            input=json.dumps(payload, ensure_ascii=False),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            env=env,
+            cwd=str(WORKSPACE),
         )
-        assert_equal(legacy["nodes"][0]["origin"], "live", "legacy node origin default missing")
-        assert_equal(legacy["nodes"][0]["confidence"], "high", "legacy node confidence default missing")
-        backups = list(legacy_path.parent.glob("legacy.schema-none-backup-*.json"))
-        assert_true(bool(backups), "legacy migration backup was not created")
+        assert_equal(result.returncode, 0, f"checkpoint JSON aliases failed: {result.stderr}")
+        output = json.loads(result.stdout)
+        assert_equal(len(output["nodes"]), 2, "batch checkpoint output node count")
+        assert_equal(len(output["edges"]), 1, "batch checkpoint output edge count")
+        with temp_env(CODEX_CANVAS_HOME=root):
+            from canvas_store import load_session
+
+            data = load_session("批量 会话")
+        assert_equal(len(data["nodes"]), 2, "batch checkpoint stored node count")
+        assert_equal(len(data["edges"]), 1, "batch checkpoint stored edge count")
+        assert_equal(data["revision"], 1, "batch checkpoints should commit atomically")
+        assert_equal(data["contentRevision"], 1, "batch content revision should advance once")
+
+
+def check_v2_concurrent_writes() -> None:
+    with tempfile.TemporaryDirectory(prefix="canvas-v2-concurrency-") as root:
+        env = os.environ.copy()
+        env.update({"CODEX_CANVAS_HOME": root, "PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1"})
+        processes = []
+        for index in range(12):
+            processes.append(
+                subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(SCRIPTS / "checkpoint.py"),
+                        "--session",
+                        "concurrent",
+                        "--auto-link",
+                        "--type",
+                        "note",
+                        "--title",
+                        f"node-{index:02d}",
+                        "--summary",
+                        f"summary-{index:02d}",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=env,
+                    cwd=str(WORKSPACE),
+                )
+            )
+        failures = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=30)
+            if process.returncode:
+                failures.append(stderr or stdout)
+        assert_true(not failures, f"concurrent checkpoint process failed: {failures}")
+        with temp_env(CODEX_CANVAS_HOME=root):
+            from canvas_store import load_session, session_path
+
+            data = load_session("concurrent")
+            path = session_path("concurrent")
+        assert_equal(len(data["nodes"]), 12, "concurrent writes lost nodes")
+        assert_equal(len(data["edges"]), 11, "concurrent auto-link lost edges")
+        assert_equal(len({node["id"] for node in data["nodes"]}), 12, "concurrent node ids collided")
+        assert_equal(data["revision"], 12, "concurrent revision count")
+        assert_true(not path.with_name(f".{path.name}.lock").exists(), "session lock file leaked")
+
+
+def check_v2_isolated_server() -> None:
+    with tempfile.TemporaryDirectory(prefix="canvas-v2-server-") as root:
+        env = os.environ.copy()
+        env.update({"CODEX_CANVAS_HOME": root, "PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1"})
+        with temp_env(CODEX_CANVAS_HOME=root):
+            from canvas_store import record_checkpoints
+
+            record_checkpoints(
+                "ui-regression",
+                [
+                    {
+                        "id": f"ui_{index}",
+                        "type": ["requirement", "decision", "plan", "implementation", "verification", "artifact"][index - 1],
+                        "title": f"UI 节点 {index}",
+                        "summary": f"第 {index} 个浏览器回归节点",
+                        "detailMarkdown": (
+                            "## 安全详情\n- [项目链接](https://example.com)\n<p onclick=\"window.__canvasXss=1\">安全正文</p>"
+                            "<script>window.__canvasXss=1</script>"
+                            if index == 1
+                            else f"## 节点 {index}\n- 结构化详情"
+                        ),
+                        "contextText": f"压缩上下文 {index}",
+                        "rawText": "用户（10:00）：浏览器回归。\n\n助手（10:01）：已记录。" if index == 1 else "",
+                        "tags": ["浏览器", "回归"],
+                        "origin": "live",
+                        "confidence": "high",
+                        "createdAt": f"2026-07-10T10:00:{index:02d}+08:00",
+                    }
+                    for index in range(1, 7)
+                ],
+                auto_link=True,
+            )
+
+        port = free_port()
+        base = f"http://127.0.0.1:{port}"
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        server = subprocess.Popen(
+            [
+                sys.executable,
+                str(SCRIPTS / "canvas_server.py"),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--session",
+                "ui-regression",
+                "--no-reuse",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            cwd=str(WORKSPACE),
+            creationflags=creationflags,
+        )
+        browser_session = f"codex-canvas-v2-{os.getpid()}"
+        npx = npx_executable()
+        try:
+            wait_for_server(f"{base}/api/health")
+            health = http_json(f"{base}/api/health")
+            assert_equal(health["schemaVersion"], 2, "health schema version")
+            data = http_json(f"{base}/api/session/ui-regression")
+            assert_equal(len(data["nodes"]), 6, "server fixture node count")
+            assert_equal(len(data["edges"]), 5, "server fixture edge count")
+
+            with urllib.request.urlopen(f"{base}/", timeout=5) as response:
+                page_html = response.read().decode("utf-8")
+                headers = response.headers
+            assert_equal(response.status, 200, "static page status")
+            assert_true("对话画布" in page_html, "static page title missing")
+            assert_equal(headers.get("X-Content-Type-Options"), "nosniff", "nosniff header missing")
+            assert_true("default-src 'self'" in (headers.get("Content-Security-Policy") or ""), "CSP header missing")
+            expect_http_error(f"{base}/..%2f..%2fetc%2fpasswd", method="GET", data=None, status=403)
+            with urllib.request.urlopen(f"{base}/favicon.svg", timeout=5) as response:
+                assert_equal(response.status, 200, "favicon status")
+
+            encoded_session = urllib.parse.quote("接口 测试", safe="")
+            http_json(
+                f"{base}/api/session/{encoded_session}/nodes",
+                method="POST",
+                body={"id": "api1", "type": "requirement", "title": "接口一", "summary": "一"},
+            )
+            http_json(
+                f"{base}/api/session/{encoded_session}/nodes",
+                method="POST",
+                body={"id": "api2", "type": "verification", "title": "接口二", "summary": "二"},
+            )
+            api_data = http_json(f"{base}/api/session/{encoded_session}")
+            assert_equal(api_data["sessionId"], "接口-测试", "Unicode session id API normalization")
+            http_json(
+                f"{base}/api/session/{encoded_session}/layout",
+                method="POST",
+                body={"positions": {"api1": {"x": 321, "y": 654}}},
+            )
+            api_data = http_json(f"{base}/api/session/{encoded_session}")
+            assert_equal(len(api_data["nodes"]), 2, "partial layout save lost a node")
+            assert_equal(next(node for node in api_data["nodes"] if node["id"] == "api1")["x"], 321, "layout position not stored")
+            http_json(f"{base}/api/session/{encoded_session}/nodes/api1", method="DELETE", expected_status=405)
+            cycle = http_json(
+                f"{base}/api/session/ui-regression/edges",
+                method="POST",
+                body={"id": "cycle", "from": "ui_6", "to": "ui_1"},
+                expected_status=400,
+            )
+            assert_true("环" in cycle.get("error", "") or "cycle" in cycle.get("error", "").lower(), "cycle error message missing")
+            expect_http_error(
+                f"{base}/api/session/{encoded_session}/nodes",
+                method="POST",
+                data=b"{",
+                status=400,
+            )
+            expect_oversized_request_rejected(base, f"/api/session/{encoded_session}/nodes")
+            with urllib.request.urlopen(f"{base}/api/session/{encoded_session}/export", timeout=5) as response:
+                assert_true("attachment" in (response.headers.get("Content-Disposition") or ""), "export disposition missing")
+
+            if not npx:
+                raise AssertionError("npx is required for browser regression")
+            run_cli(
+                [
+                    npx,
+                    "--yes",
+                    "--package",
+                    "@playwright/cli",
+                    "playwright-cli",
+                    f"-s={browser_session}",
+                    "open",
+                    f"{base}/?session=ui-regression",
+                ]
+            )
+            browser_output = run_cli(
+                [
+                    npx,
+                    "--yes",
+                    "--package",
+                    "@playwright/cli",
+                    "playwright-cli",
+                    f"-s={browser_session}",
+                    "run-code",
+                    "--filename",
+                    str(ROOT / "frontend" / "tests" / "browser-regression.js"),
+                ]
+            )
+            assert_true("ok" in browser_output and "true" in browser_output.lower(), f"browser regression result missing: {browser_output}")
+            console = run_cli(
+                [
+                    npx,
+                    "--yes",
+                    "--package",
+                    "@playwright/cli",
+                    "playwright-cli",
+                    f"-s={browser_session}",
+                    "console",
+                    "error",
+                ]
+            )
+            assert_true("Errors: 0" in console, f"browser console errors found: {console}")
+        finally:
+            if npx:
+                run_cli(
+                    [npx, "--yes", "--package", "@playwright/cli", "playwright-cli", f"-s={browser_session}", "close"],
+                    check=False,
+                )
+            server.terminate()
+            try:
+                server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait(timeout=5)
+
+
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def wait_for_server(url: str) -> None:
+    last_error: Exception | None = None
+    for _ in range(80):
+        try:
+            with urllib.request.urlopen(url, timeout=0.5) as response:
+                if response.status == 200:
+                    return
+        except Exception as exc:
+            last_error = exc
+        time.sleep(0.1)
+    raise AssertionError(f"server did not start: {last_error}")
+
+
+def expect_http_error(url: str, *, method: str, data: bytes | None, status: int) -> None:
+    request = urllib.request.Request(url, data=data, method=method)
+    if data is not None:
+        request.add_header("content-type", "application/json")
+    try:
+        urllib.request.urlopen(request, timeout=10)
+    except urllib.error.HTTPError as exc:
+        exc.read()
+        assert_equal(exc.code, status, f"HTTP status for {url}")
+        return
+    raise AssertionError(f"expected HTTP {status} for {url}")
+
+
+def expect_oversized_request_rejected(base: str, path: str) -> None:
+    parsed = urllib.parse.urlparse(base)
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10)
+    try:
+        connection.putrequest("POST", path)
+        connection.putheader("content-type", "application/json")
+        connection.putheader("content-length", str(2 * 1024 * 1024 + 1))
+        connection.endheaders()
+        response = connection.getresponse()
+        response.read()
+        assert_equal(response.status, 413, "oversized request status")
+    finally:
+        connection.close()
+
 
 
 def check_anchor_no_source() -> None:
@@ -431,277 +774,26 @@ def check_checkpoint_stdin_guard() -> None:
         "--stdin-detail-markdown",
         "--stdin-context-text",
     ]
-    result = subprocess.run(command, input="x", text=True, capture_output=True, cwd=str(WORKSPACE))
-    assert_equal(result.returncode, 2, "checkpoint stdin guard should return code 2")
-    assert_true("只能同时使用一个 stdin 输入参数" in result.stderr, "checkpoint stdin guard message missing")
-
-
-def check_live_server() -> None:
-    html = http_text(f"{SERVER}/?session={SESSION}")
-    app = http_text(f"{SERVER}/app.js?v={VERSION}")
-    css = http_text(f"{SERVER}/styles.css?v={VERSION}")
-    assert_true(VERSION in html, "live HTML did not serve current asset version")
-    assert_true("anchorBootstrapBlocked" in app, "live app.js missing current bootstrap guard")
-    assert_true(".tag-list .tag" in css, "live CSS missing chip fix")
-
-    data = http_json(f"{SERVER}/api/session/{SESSION}")
-    assert_equal(data.get("schemaVersion"), 1, "live session schemaVersion missing")
-    assert_true(data.get("createdByPluginVersion"), "live session createdByPluginVersion missing")
-    assert_true(data.get("lastOpenedByPluginVersion"), "live session lastOpenedByPluginVersion missing")
-    nodes = data["nodes"]
-    edges = data["edges"]
-    node_ids = [node["id"] for node in nodes]
-    assert_equal(len(node_ids), len(set(node_ids)), "live session has duplicate node ids")
-    assert_equal(len(edges), max(0, len(nodes) - 1), "live session edge count is not mainline length")
-    for edge in edges:
-        assert_true(edge["from"] in node_ids and edge["to"] in node_ids, f"broken edge {edge.get('id')}")
-    for node in nodes:
-        assert_true(node.get("origin") in {"live", "reconstructed", "imported"}, f"node origin missing for {node.get('id')}")
-        assert_true(node.get("confidence") in {"high", "medium", "low"}, f"node confidence missing for {node.get('id')}")
-    for node_id in data.get("composerOrder", []):
-        assert_true(node_id in node_ids, f"composerOrder references missing node {node_id}")
-    raw_prompt_fallback = [
-        node
-        for node in nodes
-        if not node.get("contextText") and not node.get("detailMarkdown") and not node.get("summary") and node.get("rawText")
-    ]
-    assert_equal(len(raw_prompt_fallback), 0, "prompt would fall back to rawText")
-    for node in nodes:
-        if node.get("id") != "current_23_regression_baseline":
-            continue
-        detail = node.get("detailMarkdown", "")
-        assert_true("本轮硬检查" in detail, "regression checkpoint detail lost Chinese text")
-        assert_true("鏈?" not in detail, "regression checkpoint detail contains mojibake")
-
-        bootstrap = http_json(f"{SERVER}/api/session/{SESSION}/bootstrap-anchor", method="POST", body={})
-        assert_equal(bootstrap["ok"], True, "bootstrap existing session should return ok")
-        assert_equal(bootstrap["created"], False, "bootstrap existing session should not create a new node")
-        assert_equal(len(bootstrap["session"]["nodes"]), len(nodes), "bootstrap existing session changed node count")
-
-        protected_delete = http_json(
-            f"{SERVER}/api/session/{SESSION}/nodes/{nodes[0]['id']}",
-            method="DELETE",
-            expected_status=405,
-        )
-        assert_true("cannot be deleted" in protected_delete.get("error", ""), "node delete should be explicitly blocked")
-        after_protected_delete = http_json(f"{SERVER}/api/session/{SESSION}")
-        assert_equal(len(after_protected_delete["nodes"]), len(nodes), "blocked node delete changed node count")
-
-    temp_session = f"regression-{os.getpid()}"
-    try:
-        http_json(
-            f"{SERVER}/api/session/{temp_session}/nodes",
-            method="POST",
-            body={"id": "a", "type": "requirement", "title": "一", "summary": "一", "contextText": "短"},
-        )
-        http_json(
-            f"{SERVER}/api/session/{temp_session}/nodes",
-            method="POST",
-            body={"id": "a", "title": "一-更新"},
-        )
-        temp_data = http_json(f"{SERVER}/api/session/{temp_session}")
-        assert_equal(len(temp_data["nodes"]), 1, "live API duplicate node id appended a second node")
-        assert_equal(temp_data["nodes"][0]["contextText"], "短", "live API partial duplicate update cleared context")
-    finally:
-        session_file = Path.home() / ".codex-canvas" / "sessions" / f"{temp_session}.json"
-        if session_file.exists():
-            session_file.unlink()
-
-
-def check_browser_ui() -> None:
-    npx = npx_executable()
-    if not npx:
-        raise AssertionError("npx is required for browser UI regression")
-    data = http_json(f"{SERVER}/api/session/{SESSION}")
-    expected_nodes = len(data["nodes"])
-    expected_edges = len(data["edges"])
-    session_name = f"codex-canvas-regression-{os.getpid()}"
-    run_cli([npx, "--yes", "--package", "@playwright/cli", "playwright-cli", f"-s={session_name}", "open", f"{SERVER}/?session={SESSION}"])
-    try:
-        console = run_cli([npx, "--yes", "--package", "@playwright/cli", "playwright-cli", f"-s={session_name}", "console", "error"])
-        assert_true("Errors: 0" in console, f"browser console errors found: {console}")
-        expression = (
-            'JSON.stringify({'
-            'formalNodes:document.querySelectorAll(".node:not(.discussion-node)").length,'
-            'discussionNodes:document.querySelectorAll(".node.discussion-node").length,'
-            'formalEdges:document.querySelectorAll(".edge-path:not(.discussion-edge)").length,'
-            'discussionEdges:document.querySelectorAll(".edge-path.discussion-edge").length,'
-            'regressionTitle:[].slice.call(document.querySelectorAll(".node-title")).filter(function(el){return el.textContent.indexOf("回归基线确认")>=0}).length,'
-            'tagOverflow:[].slice.call(document.querySelectorAll(".node-tags")).some(function(el){return el.scrollWidth>el.clientWidth+1}),'
-            'bodyOverflow:document.body.scrollWidth>window.innerWidth+1,'
-            'versionOk:([].slice.call(document.scripts).map(function(s){return s.src}).join(" ")+" "+[].slice.call(document.querySelectorAll("link[rel=stylesheet]")).map(function(l){return l.href}).join(" ")).indexOf("'
-            + VERSION
-            + '")>=0'
-            '})'
-        )
-        output = run_cli([
-            npx,
-            "--yes",
-            "--package",
-            "@playwright/cli",
-            "playwright-cli",
-            f"-s={session_name}",
-            "eval",
-            expression,
-        ])
-        ui = parse_cli_json_result(output)
-        assert_equal(ui["formalNodes"], expected_nodes, "browser formal node count mismatch")
-        assert_equal(ui["formalEdges"], expected_edges, "browser formal edge count mismatch")
-        assert_equal(ui["discussionNodes"], 1 if expected_nodes else 0, "browser discussion node count mismatch")
-        assert_equal(ui["discussionEdges"], 0, "browser should not render default discussion edge")
-        assert_equal(ui["regressionTitle"], 1, "browser missing regression checkpoint node")
-        assert_equal(ui["tagOverflow"], False, "browser node tags overflow")
-        assert_equal(ui["bodyOverflow"], False, "browser body has horizontal overflow")
-        assert_equal(ui["versionOk"], True, "browser did not load current asset version")
-    finally:
-        run_cli([npx, "--yes", "--package", "@playwright/cli", "playwright-cli", f"-s={session_name}", "close"], check=False)
-
-
-def check_browser_interactions() -> None:
-    npx = npx_executable()
-    if not npx:
-        raise AssertionError("npx is required for browser interaction regression")
-    test_session = f"ui-regression-{os.getpid()}"
-    browser_session = f"codex-canvas-ui-regression-{os.getpid()}"
-    try:
-        seed_interaction_session(test_session)
-        run_cli([npx, "--yes", "--package", "@playwright/cli", "playwright-cli", f"-s={browser_session}", "open", f"{SERVER}/?session={test_session}"])
-        initial = browser_eval_json(npx, browser_session, interaction_state_expression())
-        assert_equal(initial["formalNodes"], 4, "interaction fixture node count mismatch")
-        assert_equal(initial["formalEdges"], 3, "interaction fixture edge count mismatch")
-        assert_equal(initial["discussionNodes"], 1, "interaction fixture discussion node missing")
-
-        mainline = browser_eval_json(
-            npx,
-            browser_session,
-            '(function(){document.getElementById("useMainlineOrderBtn").click();return JSON.stringify({prompt:document.getElementById("promptBox").value,nodeMentions:(document.getElementById("promptBox").value.match(/【/g)||[]).length});})()',
-        )
-        assert_equal(mainline["nodeMentions"], 4, "mainline composer did not include all nodes")
-        assert_true("交互一" in mainline["prompt"] and "交互四" in mainline["prompt"], "mainline composer text missing expected nodes")
-
-        cleared = browser_eval_json(
-            npx,
-            browser_session,
-            '(function(){document.getElementById("clearComposerBtn").click();return JSON.stringify({prompt:document.getElementById("promptBox").value});})()',
-        )
-        assert_equal(cleared["prompt"], "", "clear composer did not empty prompt")
-
-        selected = browser_eval_json(
-            npx,
-            browser_session,
-            '(function(){document.querySelector(".node:not(.discussion-node)").click();document.getElementById("addToComposerBtn").click();return JSON.stringify({detail:document.getElementById("detailTitle").textContent,prompt:document.getElementById("promptBox").value});})()',
-        )
-        assert_equal(selected["detail"], "交互一", "node click did not show detail")
-        assert_true("交互一" in selected["prompt"], "add selected node did not update prompt")
-
-        after_select_edge_state = browser_eval_json(
-            npx,
-            browser_session,
-            'JSON.stringify({discussionEdges:document.querySelectorAll(".edge-path.discussion-edge").length,formalEdges:document.querySelectorAll(".edge-path:not(.discussion-edge)").length})',
-        )
-        assert_equal(after_select_edge_state["discussionEdges"], 0, "selecting a node should not render a discussion edge")
-        assert_equal(after_select_edge_state["formalEdges"], 3, "selecting a node should not change formal edges")
-
-        stable_discussion = browser_eval_json(
-            npx,
-            browser_session,
-            '(function(){const before=discussionNode();selectOnlyNode("ui_1");const moved=nodeById("ui_1");moved.x+=160;moved.y+=70;render();const after=discussionNode();return JSON.stringify({before:{x:before.x,y:before.y},after:{x:after.x,y:after.y},discussionLeft:document.querySelector(".discussion-node").style.left,discussionTop:document.querySelector(".discussion-node").style.top});})()',
-        )
-        assert_equal(stable_discussion["after"], stable_discussion["before"], "discussion node should not follow selected node movement")
-        assert_equal(stable_discussion["discussionLeft"], f"{stable_discussion['before']['x']}px", "discussion node DOM x should stay fixed")
-        assert_equal(stable_discussion["discussionTop"], f"{stable_discussion['before']['y']}px", "discussion node DOM y should stay fixed")
-
-        reset = browser_eval_json(
-            npx,
-            browser_session,
-            '(async function(){document.getElementById("resetCanvasBtn").click();await new Promise(function(resolve){setTimeout(resolve,600)});const data=await fetch("/api/session/'
-            + test_session
-            + '").then(function(response){return response.json()});return JSON.stringify({nodes:[].slice.call(document.querySelectorAll(".node:not(.discussion-node)")).map(function(el){return {left:el.style.left,top:el.style.top}}),edges:document.querySelectorAll(".edge-path:not(.discussion-edge)").length,edgePairs:data.edges.map(function(edge){return [edge.from,edge.to]}),undoDisabled:document.getElementById("undoEdgeBtn").disabled});})()',
-        )
-        assert_equal(reset["edges"], 3, "reset canvas changed formal edge count")
-        assert_equal(reset["nodes"][0]["left"], "80px", "reset canvas did not restore first node x")
-        assert_equal(reset["nodes"][0]["top"], "80px", "reset canvas did not restore first node y")
-        assert_equal(reset["nodes"][3]["left"], "80px", "reset canvas did not wrap fourth node to first column")
-        assert_equal(reset["nodes"][3]["top"], "310px", "reset canvas did not move fourth node to second row")
-        assert_equal(reset["edgePairs"], [["ui_1", "ui_2"], ["ui_2", "ui_3"], ["ui_3", "ui_4"]], "reset canvas did not rebuild default mainline")
-        assert_equal(reset["undoDisabled"], False, "reset canvas did not add an undo action")
-
-        undo_reset = browser_eval_json(
-            npx,
-            browser_session,
-            '(async function(){document.getElementById("undoEdgeBtn").click();await new Promise(function(resolve){setTimeout(resolve,700)});const data=await fetch("/api/session/'
-            + test_session
-            + '").then(function(response){return response.json()});return JSON.stringify({nodes:[].slice.call(document.querySelectorAll(".node:not(.discussion-node)")).map(function(el){return {left:el.style.left,top:el.style.top}}),edges:document.querySelectorAll(".edge-path:not(.discussion-edge)").length,edgePairs:data.edges.map(function(edge){return [edge.from,edge.to]}),undoDisabled:document.getElementById("undoEdgeBtn").disabled});})()',
-        )
-        assert_equal(undo_reset["edges"], 3, "undo reset changed formal edge count")
-        assert_equal(undo_reset["nodes"][3]["left"], "1130px", "undo reset did not restore fourth node x")
-        assert_equal(undo_reset["nodes"][3]["top"], "80px", "undo reset did not restore fourth node y")
-        assert_equal(undo_reset["edgePairs"], [["ui_1", "ui_3"], ["ui_3", "ui_2"], ["ui_2", "ui_4"]], "undo reset did not restore previous edges")
-        assert_equal(undo_reset["undoDisabled"], True, "undo stack should be empty after undoing reset in this fixture")
-    finally:
-        if npx:
-            run_cli([npx, "--yes", "--package", "@playwright/cli", "playwright-cli", f"-s={browser_session}", "close"], check=False)
-        delete_session_file(test_session)
-
-
-def seed_interaction_session(session_id: str) -> None:
-    nodes = [
-        {"id": "ui_1", "type": "requirement", "title": "交互一", "summary": "第一节点", "contextText": "上下文一", "x": 80, "y": 80},
-        {"id": "ui_2", "type": "decision", "title": "交互二", "summary": "第二节点", "contextText": "上下文二", "x": 430, "y": 80},
-        {"id": "ui_3", "type": "implementation", "title": "交互三", "summary": "第三节点", "contextText": "上下文三", "x": 780, "y": 80},
-        {"id": "ui_4", "type": "verification", "title": "交互四", "summary": "第四节点", "contextText": "上下文四", "x": 1130, "y": 80},
-    ]
-    for node in nodes:
-        http_json(f"{SERVER}/api/session/{session_id}/nodes", method="POST", body=node)
-    edges = [("ui_1", "ui_3"), ("ui_3", "ui_2"), ("ui_2", "ui_4")]
-    for index, (from_id, to_id) in enumerate(edges, start=1):
-        http_json(
-            f"{SERVER}/api/session/{session_id}/edges",
-            method="POST",
-            body={"id": f"ui_edge_{index}", "from": from_id, "to": to_id, "label": ""},
-        )
-
-
-def interaction_state_expression() -> str:
-    return (
-        'JSON.stringify({'
-        'formalNodes:document.querySelectorAll(".node:not(.discussion-node)").length,'
-        'discussionNodes:document.querySelectorAll(".node.discussion-node").length,'
-        'formalEdges:document.querySelectorAll(".edge-path:not(.discussion-edge)").length,'
-        'discussionEdges:document.querySelectorAll(".edge-path.discussion-edge").length,'
-        'prompt:document.getElementById("promptBox").value'
-        '})'
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    result = subprocess.run(
+        command,
+        input="x",
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        cwd=str(WORKSPACE),
+        env=env,
     )
+    assert_equal(result.returncode, 2, "checkpoint stdin guard should return code 2")
+    assert_true("一次只能使用一个" in result.stderr, "checkpoint stdin guard message missing")
 
-
-def browser_eval_json(npx: str, session_name: str, expression: str) -> dict[str, Any]:
-    output = run_cli([
-        npx,
-        "--yes",
-        "--package",
-        "@playwright/cli",
-        "playwright-cli",
-        f"-s={session_name}",
-        "eval",
-        expression,
-    ])
-    return parse_cli_json_result(output)
-
-
-def delete_session_file(session_id: str) -> None:
-    session_file = Path.home() / ".codex-canvas" / "sessions" / f"{session_id}.json"
-    if session_file.exists():
-        session_file.unlink()
 
 
 def npx_executable() -> str | None:
     return shutil.which("npx.cmd") or shutil.which("npx.exe") or shutil.which("npx")
 
-
-def run(command: list[str]) -> None:
-    result = subprocess.run(command, cwd=str(WORKSPACE), text=True, encoding="utf-8", errors="replace", capture_output=True)
-    if result.returncode:
-        raise AssertionError(result.stderr or result.stdout or f"command failed: {' '.join(command)}")
 
 
 def run_cli(command: list[str], check: bool = True) -> str:
@@ -711,20 +803,6 @@ def run_cli(command: list[str], check: bool = True) -> str:
         raise AssertionError(output or f"command failed: {' '.join(command)}")
     return output
 
-
-def parse_cli_json_result(output: str) -> dict[str, Any]:
-    match = re.search(r"### Result\s*\n([\s\S]*?)(?:\n### |\Z)", output)
-    if not match:
-        raise AssertionError(f"could not parse playwright result: {output}")
-    result_text = match.group(1).strip()
-    if result_text.startswith('"'):
-        return json.loads(json.loads(result_text))
-    return json.loads(result_text)
-
-
-def http_text(url: str) -> str:
-    with urllib.request.urlopen(url, timeout=5) as response:
-        return response.read().decode("utf-8")
 
 
 def http_json(

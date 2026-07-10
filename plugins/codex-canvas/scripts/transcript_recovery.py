@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from canvas_store import load_session, save_session
+sys.dont_write_bytecode = True
+
+from canvas_store import load_session, update_nodes_bulk
 
 
 MAX_FILES = 40
@@ -49,7 +52,7 @@ def recover_session_raw_text(session_id: str | None, workspace_hint: str | None 
     if not transcripts:
         return {"ok": False, "updated": 0, "sources": [], "message": "没有找到可读的 Codex 会话记录。"}
 
-    updated = 0
+    patches: list[dict[str, Any]] = []
     used_sources: set[str] = set()
     for index, node in enumerate(nodes):
         if not needs_recovery(node):
@@ -57,13 +60,10 @@ def recover_session_raw_text(session_id: str | None, workspace_hint: str | None 
         recovered, source = recover_node_text(node, transcripts, index, len(nodes))
         if not recovered:
             continue
-        node["rawText"] = recovered
+        patches.append({"id": node.get("id"), "rawText": recovered})
         if source:
             used_sources.add(str(source))
-        updated += 1
-
-    if updated:
-        save_session(session_id, data)
+    updated = len(update_nodes_bulk(session_id, patches)) if patches else 0
 
     return {
         "ok": True,

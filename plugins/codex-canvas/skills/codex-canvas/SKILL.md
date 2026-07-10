@@ -1,114 +1,117 @@
 ---
 name: codex-canvas
-description: Record phase-level checkpoints for the current Codex conversation in a n8n-style canvas. Use when the user asks for Codex Canvas, conversation maps, checkpoint nodes, automatic phase summaries, or prompt assembly from selected checkpoints.
+description: Maintain a phase-level checkpoint canvas for the current Codex conversation. Use for conversation maps, checkpoint summaries, canvas review, selected-context assembly, or when the user asks to open or update the conversation canvas.
 ---
 
-# Codex Canvas
+# 对话画布
 
-Use this skill to keep a per-thread checkpoint canvas for the current Codex conversation.
+把当前 Codex 对话沉淀成一张独立画布。一个节点代表一个小话题或阶段，不代表单条消息。
 
-## Core Rule
+## 不可改变的边界
 
-Automatically create a checkpoint when a meaningful phase is complete. Do not create one for every message.
+- 画布不修改 Codex 记忆、系统提示或内部上下文。
+- 连线只表达检查点关系，并决定底部组装区的默认顺序。
+- 画布不自动向 Codex 客户端发送消息。
+- checkpoint 节点属于对话记录，界面不允许删除；位置、连线和组装顺序可以调整。
+- `rawText` 只保存必要的短证据，主要内容使用 `detailMarkdown` 和 `contextText`。
 
-This is mandatory behavior for this skill. Do not wait for the user to ask "record this" after a phase has clearly finished. If the canvas session is known and the work produced a decision, implementation, verification, blocker, or resolved subtopic, record the checkpoint before the final reply for that turn.
+## 先确定运行模式
 
-A checkpoint is appropriate when one of these happens:
+### 1. 已从对话开始静默记录
 
-- The user establishes or changes the product goal.
-- A small topic or stage has been resolved.
-- A key decision has been made.
-- A plan has been accepted or replaced.
-- A file or artifact has been created or materially changed.
-- A verification step has completed.
-- A blocker or open question has been identified.
+继续复用当前对话固定的 session-id。阶段完成时直接调用 `checkpoint.py`，不要重建历史，也不要为了记录一个节点加载或扫描完整对话。
 
-When the canvas is empty but the current Codex conversation is already underway, reconstruct only the useful amount of history before normal live checkpointing begins.
+### 2. 已经聊了一段时间，首次启用画布
 
-If the canvas already contains only a `画布启用` starter anchor, or that starter anchor plus a few early `live` checkpoints, and there are still no `reconstructed` nodes, this is not "history already handled". Try to reconstruct useful prior history first, then keep the existing live nodes after the reconstructed nodes.
+优先使用当前 Agent 已经拥有的对话上下文，一次性总结历史节点：
 
-Do not force a minimum number such as 3 reconstructed nodes. Choose the count from the actual amount of meaningful prior conversation:
+1. 判断实际存在多少个有意义阶段，不设固定数量。
+2. 短对话可以只有 1 个节点；长对话默认最多 8 个。
+3. 每个阶段写一个 `origin=reconstructed` 节点。
+4. 使用一次批量 JSON 写入，避免逐节点重复调用和重复总结。
+5. 历史节点写完后，再进入正常 `live` checkpoint。
 
-- If there is no reliable prior context, create no reconstructed node and let the next real checkpoint start the canvas.
-- If there is only one small topic, create one `anchor` or one reconstructed checkpoint.
-- If there are a few clear phases, create one node per phase.
-- If there is a long conversation, create enough nodes to preserve the major product decisions, implementation stages, verification results, and unresolved questions, capped at 8 by default.
+不要先创建空洞的“画布启用”占位节点。不要把当前 Agent 能直接总结的内容再次交给离线脚本总结。
 
-Reconstructed nodes must be honest summaries, not fake originals. Leave `rawText` empty unless there is a short exact excerpt worth preserving. Use `detailMarkdown` for structured history and `contextText` for compact prompt assembly.
+### 3. 当前上下文确实不足
 
-## What A Checkpoint Contains
+仅在需要回看历史、且当前 Agent 无法可靠总结时，才运行 `conversation_anchor.py` 或 `transcript_recovery.py`。离线来源必须能通过当前 session、项目目录或相关文件可靠匹配；匹配不可靠时宁可不补。
 
-Each checkpoint must have:
+## 什么时候提交节点
 
-- `type`: one of `anchor`, `requirement`, `decision`, `plan`, `implementation`, `verification`, `blocker`, `artifact`, `note`.
-- `title`: short title, ideally 4 to 12 Chinese characters or a concise phrase.
-- `summary`: 1 to 3 sentences explaining the stage.
-- `detailMarkdown`: human-readable structured detail. Prefer sections such as `已确认`, `正在讨论`, `决策`, `风险`, `下一步`.
-- `contextText`: compressed context used when assembling content back into Codex. Keep this much shorter than raw dialogue.
-- `source`: `user`, `assistant`, or `mixed`.
-- `origin`: `live`, `reconstructed`, or `imported`. Use `live` for normal checkpoints after the canvas is enabled. Use `reconstructed` for old-conversation catch-up nodes.
-- `confidence`: `high`, `medium`, or `low`, based on how much reliable context supports the node.
-- `relatedFiles`: files touched or discussed, if any.
-- `evidenceRefs`: optional source references, local files, or message ranges that can be used for review.
-- `tags`: short labels.
+满足任一条件时提交一个 checkpoint：
 
-`rawText` is optional evidence. Do not use it as the primary node content unless the user explicitly asks to preserve original excerpts.
+- 产品目标或需求已经确认或改变。
+- 一个小话题得出结论。
+- 方案、计划或取舍已经确定。
+- 实现或重要文件修改已经完成。
+- 验证完成并有明确结果。
+- 出现需要保留的阻塞、风险或未决问题。
 
-## Session Rule
+快速澄清、纯状态回复、细小文案调整不生成节点。同一阶段的连续实现和修复应合并成一个完整节点。
 
-For each Codex conversation, maintain one canvas session id. If the user does not provide one, create a readable id using the date and topic, for example:
+## 节点内容
 
-```text
-20260611-codex-canvas-mvp
-```
+每个节点至少包含：
 
-Use the same session id for all later checkpoints in this conversation.
+- `type`：`anchor`、`requirement`、`decision`、`plan`、`implementation`、`verification`、`blocker`、`artifact`、`note`。
+- `title`：简短可扫描的阶段名。
+- `summary`：1 到 3 句阶段结论。
+- `detailMarkdown`：结构化详情，可包含标题、列表、风险、验证和下一步。
+- `contextText`：给底部组装区使用的压缩上下文，明显短于完整对话。
+- `source`：`user`、`assistant` 或 `mixed`。
+- `origin`：正常记录用 `live`，首次回看用 `reconstructed`。
+- `confidence`：`high`、`medium` 或 `low`。
+- `relatedFiles`、`evidenceRefs`、`tags`：有内容时再写。
 
-## Recording Checkpoints
+## 脚本路径
 
-When a checkpoint should be recorded, run:
+从当前 `SKILL.md` 所在目录向上两级确定插件根目录。脚本位于 `<plugin-root>/scripts/`。不要把当前工作目录误当作插件目录。
 
-```powershell
-python .\plugins\codex-canvas\scripts\checkpoint.py --session "<session-id>" --auto-link --type "<type>" --title "<title>" --summary "<summary>" --detail-markdown "<structured detail>" --context-text "<compressed context>" --origin live --confidence high
-```
-
-Add repeated `--tag` and `--related-file` values when useful.
-
-Use `--auto-link` by default so the new checkpoint is connected from the previous checkpoint. Only omit it when the user explicitly asks for an unconnected node or when the node is intentionally standalone.
-
-Only add `--raw-text` when preserving a short original excerpt is explicitly useful as evidence. Raw text is not the default storage path.
-
-## Auto Checkpoint Discipline
-
-At the end of each substantial turn:
-
-1. Decide whether the turn completed a meaningful phase.
-2. If yes, record exactly one checkpoint summarizing that phase.
-3. Include `detailMarkdown` for the right panel and `contextText` for prompt assembly. Keep `contextText` concise.
-4. Use `source=mixed` when both user feedback and assistant implementation shaped the phase.
-5. Use `origin=live` for normal new checkpoints.
-6. Mention briefly in the final response that a checkpoint was recorded, unless a user or global instruction asks for silent canvas recording. In silent mode, do not mention successful checkpoint writes; only mention failures, blockers, or canvas status when the user asks.
-
-Do not create a checkpoint for quick clarifications, pure status replies, or tiny wording-only answers.
-
-## Opening The Canvas
-
-To open the canvas for a session, run:
+## 写一个实时节点
 
 ```powershell
-python .\plugins\codex-canvas\scripts\canvas_server.py --session "<session-id>" --open
+python "<plugin-root>\scripts\checkpoint.py" --session "<固定-session-id>" --auto-link --type "verification" --title "验证完成" --summary "核心交互已经通过回归。" --detail-markdown "## 验证`n- 结果一`n- 结果二" --context-text "当前阶段已完成验证，可继续下一步。" --origin live --confidence high
 ```
 
-If a server is already running, use the printed URL:
+默认使用 `--auto-link`。只有节点明确独立时才省略。
 
-```text
-http://127.0.0.1:8765/?session=<session-id>
+## 首次批量写入历史节点
+
+`checkpoint.py --stdin-json` 同时接受 `session/checkpoints` 和 `sessionId/nodes`：
+
+```powershell
+$payload = @{
+  sessionId = "<固定-session-id>"
+  autoLink = $true
+  nodes = @(
+    @{
+      type = "requirement"
+      title = "确认目标"
+      summary = "用户确认了本次工作的核心目标。"
+      detailMarkdown = "## 已确认`n- 目标`n- 边界"
+      contextText = "核心目标和边界的压缩说明。"
+      source = "mixed"
+      origin = "reconstructed"
+      confidence = "high"
+    }
+  )
+} | ConvertTo-Json -Depth 8 -Compress
+
+$payload | python "<plugin-root>\scripts\checkpoint.py" --stdin-json
 ```
 
-## Important Boundaries
+## 打开画布
 
-- Do not change Codex memory.
-- Do not claim that edges modify Codex internal context.
-- Edges only express which checkpoints should be assembled into the next user prompt.
-- The canvas summarizes the current conversation; it is not a global history browser.
-- Keep user-facing explanations in Chinese unless the user asks otherwise.
+```powershell
+python "<plugin-root>\scripts\canvas_server.py" --session "<固定-session-id>" --open
+```
+
+返回脚本实际输出的 URL。默认端口为 `8765`；端口被占用时服务会选择其他可用端口。每个对话通过 `?session=<session-id>` 隔离，不会互相覆盖。
+
+## 回复纪律
+
+- 静默模式下，成功记录后不要提示“已写入画布”。
+- 记录失败、来源不可靠、session-id 无法确定，或用户主动询问画布状态时才说明。
+- 用户要求“打开画布 / 看画布 / 给我链接”时，启动服务并返回精确 URL。
+- 默认用中文解释。

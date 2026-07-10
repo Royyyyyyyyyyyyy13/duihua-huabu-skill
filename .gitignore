@@ -4,6 +4,10 @@
 # Local browser/test artifacts
 .playwright-cli/
 output/
+test-results/
+
+# Frontend dependencies are rebuilt with npm ci
+plugins/codex-canvas/frontend/node_modules/
 
 # Python cache
 __pycache__/

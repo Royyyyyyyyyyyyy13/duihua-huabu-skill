@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+sys.dont_write_bytecode = True
 
 from canvas_store import (
     GRID_COLUMN_GAP,
@@ -12,10 +15,8 @@ from canvas_store import (
     GRID_LEFT,
     GRID_ROW_GAP,
     GRID_TOP,
-    add_edge,
-    add_node,
+    insert_reconstructed_nodes,
     load_session,
-    save_session,
 )
 from transcript_recovery import Turn, codex_home, compact_text, parse_transcript
 
@@ -53,23 +54,13 @@ def bootstrap_anchor_node(session_id: str | None, workspace_hint: str | None = N
             "session": data,
         }
 
-    nodes = []
-    previous_node = None
-    for item in build_reconstructed_nodes(source):
-        node = add_node(session_id, item)
-        nodes.append(node)
-        if previous_node:
-            add_edge(session_id, {"from": previous_node.get("id"), "to": node.get("id"), "label": ""})
-        previous_node = node
-    if starter_nodes and previous_node:
-        add_edge(session_id, {"from": previous_node.get("id"), "to": starter_nodes[0].get("id"), "label": ""})
-        session = reorder_reconstructed_before_existing(
-            session_id,
-            [node.get("id") for node in nodes],
-            [node.get("id") for node in starter_nodes],
-        )
-    else:
-        session = load_session(session_id)
+    inserted = insert_reconstructed_nodes(
+        session_id,
+        build_reconstructed_nodes(source),
+        [node.get("id") for node in starter_nodes],
+    )
+    nodes = inserted["nodes"]
+    session = inserted["session"]
     return {
         "ok": True,
         "created": True,
@@ -134,31 +125,6 @@ def infer_workspace_hint(data: dict[str, Any]) -> str | None:
         return os.path.commonpath(absolute_paths)
     except ValueError:
         return str(Path(absolute_paths[0]).parent)
-
-
-def reorder_reconstructed_before_existing(
-    session_id: str | None,
-    reconstructed_ids: list[str],
-    existing_ids: list[str],
-) -> dict[str, Any]:
-    data = load_session(session_id)
-    node_by_id = {node.get("id"): node for node in data.get("nodes", [])}
-    ordered_ids = [node_id for node_id in reconstructed_ids if node_id in node_by_id]
-    ordered = set(ordered_ids)
-    for node_id in existing_ids:
-        if node_id in node_by_id and node_id not in ordered:
-            ordered_ids.append(node_id)
-            ordered.add(node_id)
-    for node in data.get("nodes", []):
-        node_id = node.get("id")
-        if node_id not in ordered:
-            ordered_ids.append(node_id)
-            ordered.add(node_id)
-    data["nodes"] = [node_by_id[node_id] for node_id in ordered_ids if node_id in node_by_id]
-    for index, node in enumerate(data["nodes"]):
-        node["x"] = GRID_LEFT + (index % GRID_COLUMNS) * GRID_COLUMN_GAP
-        node["y"] = GRID_TOP + (index // GRID_COLUMNS) * GRID_ROW_GAP
-    return save_session(session_id, data)
 
 
 def find_anchor_source(workspace_hint: str | None, session_id: str | None = None) -> AnchorSource | None:

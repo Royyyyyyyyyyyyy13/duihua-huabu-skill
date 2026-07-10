@@ -1,0 +1,27 @@
+{
+  "name": "codex-canvas-frontend",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "check": "vite build --emptyOutDir=false",
+    "test": "node tests/unit.mjs",
+    "notices": "node scripts/generate-third-party-notices.mjs"
+  },
+  "dependencies": {
+    "@vue-flow/background": "1.3.2",
+    "@vue-flow/controls": "1.1.3",
+    "@vue-flow/core": "1.48.2",
+    "@vue-flow/minimap": "1.5.4",
+    "dompurify": "3.4.11",
+    "@lucide/vue": "1.24.0",
+    "marked": "18.0.6",
+    "vue": "3.5.39"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "6.0.7",
+    "vite": "8.1.4"
+  }
+}
